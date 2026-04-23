@@ -44,6 +44,7 @@ from src.db.groups import (
     list_user_groups, list_group_members,
     share_trade, post_comment, fetch_timeline, ranking,
 )
+from src.ai.personal_profile import analyze_user_profile, format_profile_message, save_profile_snapshot
 
 load_dotenv()
 log = logging.getLogger(__name__)
@@ -566,6 +567,18 @@ def _handle_command(user_id: str, text: str) -> str:
             )
         return "\n".join(lines)
 
+    if cmd == "/profile":
+        sub = parts[1].lower() if len(parts) > 1 else "show"
+        if sub == "show":
+            p = analyze_user_profile(user_id)
+            return format_profile_message(p)
+        if sub == "save":
+            # 手動スナップショット（デバッグ用）
+            p = analyze_user_profile(user_id)
+            save_profile_snapshot(p)
+            return "✅ プロファイルを保存しました"
+        return "使い方: /profile [show|save]"
+
     if cmd == "/help":
         return (
             "📖 コマンド一覧\n\n"
@@ -610,6 +623,9 @@ def _handle_command(user_id: str, text: str) -> str:
             "/score <ticker>        4軸スコアリング\n"
             "/optimize [top_n]      ウォッチリスト最適化\n"
             "/audit                 既存ウォッチリスト監査\n\n"
+            "【個人AI秘書】\n"
+            "/profile               あなたの投資プロファイル\n"
+            "/profile save          スナップショット保存\n\n"
             "【グループ共有】\n"
             "/group create <名前>   グループ作成\n"
             "/group join <コード>   招待コードで参加\n"

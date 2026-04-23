@@ -143,3 +143,16 @@ ALTER TABLE groups         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE group_members  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trade_shares   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE group_messages ENABLE ROW LEVEL SECURITY;
+
+-- =============================================
+-- Step12: 個人AI秘書の成長ログ
+-- =============================================
+CREATE TABLE IF NOT EXISTS user_insights (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      TEXT NOT NULL,
+  insight_type TEXT NOT NULL,           -- 'weekly_profile' | 'sector_winrate' | 'discipline'
+  payload      JSONB NOT NULL,
+  generated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_user_insights_user ON user_insights (user_id, generated_at DESC);
+ALTER TABLE user_insights ENABLE ROW LEVEL SECURITY;
