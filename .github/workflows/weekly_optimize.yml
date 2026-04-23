@@ -1,0 +1,36 @@
+name: Weekly Watchlist Optimize
+
+on:
+  schedule:
+    # 毎週月曜 7:30 JST (市場オープン30分前) = UTC 日曜 22:30
+    - cron: "30 22 * * 0"
+  workflow_dispatch:
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run watchlist optimizer
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID:              ${{ secrets.LINE_USER_ID }}
+          OPENAI_API_KEY:            ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL:              ${{ secrets.OPENAI_MODEL }}
+          SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SCREEN_UNIVERSE:           ${{ vars.SCREEN_UNIVERSE }}
+          OPTIMIZE_TOP_N:            ${{ vars.OPTIMIZE_TOP_N }}
+          TZ: Asia/Tokyo
+        run: python scripts/run_optimize.py

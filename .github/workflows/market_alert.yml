@@ -1,0 +1,36 @@
+name: Market Alert
+
+on:
+  schedule:
+    # 15分毎 (平日 9:00〜15:30 JST = UTC 0:00〜6:30)
+    - cron: "0,15,30,45 0-6 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run market alert check
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID:              ${{ secrets.LINE_USER_ID }}
+          OPENAI_API_KEY:            ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL:              ${{ secrets.OPENAI_MODEL }}
+          SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SCAN_TICKERS:              ${{ vars.SCAN_TICKERS }}
+          DIVERGENCE_THRESHOLD:      ${{ vars.DIVERGENCE_THRESHOLD }}
+          TZ: Asia/Tokyo
+        run: python scripts/run_alert.py
