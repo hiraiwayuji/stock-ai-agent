@@ -269,4 +269,21 @@ bash start_scheduler.sh
 
 ## ライセンス
 
-MIT
+## 🖥 グループ共有デモ画面 (Streamlit)
+
+LINEグループメンバー全員で見られる Web ダッシュボード。
+
+### ローカル起動
+```bash
+streamlit run app.py
+```
+ブラウザで `http://localhost:8501/?code=<招待コード>` にアクセス。
+
+### Streamlit Cloud デプロイ
+1. https://share.streamlit.io で GitHub repo を接続
+2. Main file: `app.py`
+3. Secrets に `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` を登録
+4. デプロイ後 `https://<app>.streamlit.app/?code=XXXXXX` をLINEグループへ共有
+
+画面構成:
+- 🏆 ランキング / 📜 タイムライン / 📊 セクター集計 / 🚨 アラート履歴

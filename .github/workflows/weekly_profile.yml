@@ -1,0 +1,33 @@
+name: Weekly Profile Push
+
+on:
+  schedule:
+    # 毎週日曜 JST 20:00 = UTC 11:00
+    - cron: "0 11 * * 0"
+  workflow_dispatch:
+
+jobs:
+  weekly_profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run weekly profile push
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          OPENAI_API_KEY:            ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL:              ${{ secrets.OPENAI_MODEL }}
+          TZ: Asia/Tokyo
+        run: python scripts/run_weekly_profile.py

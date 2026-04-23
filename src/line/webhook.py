@@ -44,7 +44,10 @@ from src.db.groups import (
     list_user_groups, list_group_members,
     share_trade, post_comment, fetch_timeline, ranking,
 )
-from src.ai.personal_profile import analyze_user_profile, format_profile_message, save_profile_snapshot
+from src.ai.personal_profile import (
+    analyze_user_profile, format_profile_message, save_profile_snapshot,
+    build_personal_context, analyze_win_lose_patterns, format_pattern_diff_message
+)
 
 load_dotenv()
 log = logging.getLogger(__name__)
@@ -113,7 +116,11 @@ def _handle_command(user_id: str, text: str) -> str:
             f"RSI: {signals['RSI']}  MACD差: {signals['MACD_diff']}\n"
             f"BB位置: {signals['BB_pct']}  MA乖離率: {signals['MA_div_pct']}%"
         )
-        analysis = analyze(context, f"{ticker} の現状分析と短期戦略を教えてください")
+        p_context = build_personal_context(user_id)
+        analysis_context = context
+        if p_context:
+            analysis_context += f"\n\n{p_context}"
+        analysis = analyze(analysis_context, f"{ticker} の現状分析と短期戦略を教えてください")
         return f"📊 {ticker} テクニカル分析\n\n{context}\n\n🤖 AI分析:\n{analysis}"
 
     if cmd == "/regime":
@@ -139,7 +146,8 @@ def _handle_command(user_id: str, text: str) -> str:
 
     if cmd == "/ask":
         question = " ".join(parts[1:]) if len(parts) > 1 else text
-        return analyze("", question)
+        p_context = build_personal_context(user_id)
+        return analyze(p_context, question)
 
     # ---- ポートフォリオ管理 ----
     if cmd == "/buy":
@@ -577,7 +585,17 @@ def _handle_command(user_id: str, text: str) -> str:
             p = analyze_user_profile(user_id)
             save_profile_snapshot(p)
             return "✅ プロファイルを保存しました"
-        return "使い方: /profile [show|save]"
+        if sub == "strength":
+            diff = analyze_win_lose_patterns(user_id)
+            if not diff.get("win") or diff["win"]["count"] < 5:
+                return "勝ち取引データが不足しています（最低5件必要）"
+            return format_pattern_diff_message(diff, strength=True)
+        if sub == "weakness":
+            diff = analyze_win_lose_patterns(user_id)
+            if not diff.get("lose") or diff["lose"]["count"] < 5:
+                return "負け取引データが不足しています（最低5件必要）"
+            return format_pattern_diff_message(diff, strength=False)
+        return "使い方: /profile [show|save|strength|weakness]"
 
     if cmd == "/help":
         return (
@@ -625,7 +643,9 @@ def _handle_command(user_id: str, text: str) -> str:
             "/audit                 既存ウォッチリスト監査\n\n"
             "【個人AI秘書】\n"
             "/profile               あなたの投資プロファイル\n"
-            "/profile save          スナップショット保存\n\n"
+            "/profile save          スナップショット保存\n"
+            "/profile strength      得意パターンTOP3\n"
+            "/profile weakness      苦手パターン + AI改善提案\n\n"
             "【グループ共有】\n"
             "/group create <名前>   グループ作成\n"
             "/group join <コード>   招待コードで参加\n"

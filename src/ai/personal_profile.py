@@ -163,3 +163,152 @@ def save_profile_snapshot(profile: UserProfile):
         "insight_type": "weekly_profile",
         "payload": payload
     }).execute()
+
+def build_personal_context(user_id: str) -> str:
+    try:
+        p = analyze_user_profile(user_id)
+        if p.total_trades < 5:
+            return ""
+        
+        lines = [
+            "【このユーザーの傾向】",
+            f"総取引{p.total_trades}回 / 勝率{p.win_rate:.0f}% / 平均保有{p.avg_hold_days:.0f}日"
+        ]
+        
+        sorted_sec = sorted(p.sector_winrate.items(), key=lambda x: (x[1]["winrate"], x[1]["trades"]), reverse=True)
+        if sorted_sec:
+            best = sorted_sec[0]
+            if len(sorted_sec) == 1:
+                lines.append(f"得意: {best[0]}(勝率{best[1]['winrate']:.0f}%)")
+            else:
+                worst = sorted_sec[-1]
+                lines.append(f"得意: {best[0]}(勝率{best[1]['winrate']:.0f}%) / 苦手: {worst[0]}(勝率{worst[1]['winrate']:.0f}%)")
+             
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+def analyze_win_lose_patterns(user_id: str) -> dict:
+    trades = get_trade_history(user_id, limit=500)
+    
+    buy_records = {}
+    win_list = []
+    lose_list = []
+    
+    weekdays_str = ["月", "火", "水", "木", "金", "土", "日"]
+    trades_asc = list(reversed(trades))
+    
+    for row in trades_asc:
+        side = row["side"]
+        ticker = row["ticker"]
+        dt = datetime.fromisoformat(row["traded_at"])
+        wd = weekdays_str[dt.weekday()]
+        qty = float(row.get("qty") or 0.0)
+        price = float(row.get("price") or 0.0)
+        
+        if side == "buy":
+            if ticker not in buy_records:
+                buy_records[ticker] = []
+            buy_records[ticker].append([dt, qty])
+        elif side == "sell":
+            pnl = float(row.get("pnl") or 0.0)
+            sector = SECTOR_MAP.get(ticker, "その他")
+            
+            lots = buy_records.get(ticker, [])
+            remaining = qty
+            weighted_days = 0.0
+            consumed_qty = 0.0
+            while remaining > 0 and lots:
+                lot = lots[0]
+                take = min(lot[1], remaining)
+                days = (dt - lot[0]).total_seconds() / 86400.0
+                weighted_days += days * take
+                consumed_qty += take
+                lot[1] -= take
+                remaining -= take
+                if lot[1] <= 0:
+                    lots.pop(0)
+            
+            hold_days = weighted_days / consumed_qty if consumed_qty > 0 else 0.0
+            pos_size = qty * price
+            
+            record = {
+                "sector": sector,
+                "weekday": wd,
+                "hold_days": hold_days,
+                "pos_size": pos_size
+            }
+            
+            if pnl > 0:
+                win_list.append(record)
+            else:
+                lose_list.append(record)
+                
+    def summarize(lst):
+        if not lst:
+            return None
+        count = len(lst)
+        avg_hold_days = sum(x["hold_days"] for x in lst) / count
+        avg_pos_size = sum(x["pos_size"] for x in lst) / count
+        sectors = {}
+        weekdays = {}
+        for x in lst:
+            sectors[x["sector"]] = sectors.get(x["sector"], 0) + 1
+            weekdays[x["weekday"]] = weekdays.get(x["weekday"], 0) + 1
+        return {
+            "count": count,
+            "avg_hold_days": avg_hold_days,
+            "avg_position_size": avg_pos_size,
+            "sectors": sectors,
+            "weekdays": weekdays
+        }
+        
+    return {
+        "win": summarize(win_list),
+        "lose": summarize(lose_list)
+    }
+
+def format_pattern_diff_message(diff: dict, strength: bool) -> str:
+    if strength:
+        target = diff.get("win")
+        other = diff.get("lose")
+        title = "💪 あなたの得意パターン"
+        desc = "勝ち"
+        other_desc = "負け"
+    else:
+        target = diff.get("lose")
+        other = diff.get("win")
+        title = "⚠️ 苦手パターン注意"
+        desc = "負け"
+        other_desc = "勝ち"
+        
+    lines = [title, ""]
+    
+    count = target["count"]
+    
+    # 1. Sector
+    top_sector = sorted(target["sectors"].items(), key=lambda x: x[1], reverse=True)[0]
+    lines.append(f"1. セクター: {top_sector[0]} ({desc}{count}回中{top_sector[1]}回)")
+    
+    # 2. Hold days
+    other_hold = other["avg_hold_days"] if other else 0
+    hold_diff = abs(target["avg_hold_days"] - other_hold) if other else 0
+    if other:
+        lines.append(f"2. 保有日数: 平均{target['avg_hold_days']:.1f}日（{other_desc}より{hold_diff:.1f}日{'短い' if target['avg_hold_days'] < other_hold else '長い'}）")
+    else:
+        lines.append(f"2. 保有日数: 平均{target['avg_hold_days']:.1f}日")
+    
+    # 3. Position Size or Weekday
+    if strength:
+        top_wd = sorted(target["weekdays"].items(), key=lambda x: x[1], reverse=True)[0]
+        lines.append(f"3. 取引曜日: {top_wd[0]}曜が最も{desc}やすい")
+    else:
+        lines.append(f"3. ポジションサイズ: {desc}取引は平均¥{target['avg_position_size']:,.0f}")
+        
+    if not strength:
+        from src.ai.analyst import analyze
+        context = "\n".join(lines)
+        advice = analyze(context, "この苦手パターンに対する具体的な改善提案を2〜3文で出力してください。")
+        lines.append("\n🤖 AI改善提案\n" + advice)
+        
+    return "\n".join(lines)
