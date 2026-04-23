@@ -46,8 +46,10 @@ def add_position(user_id: str, ticker: str, qty: float, cost: float, note: str =
         }).execute()
 
 
-def reduce_position(user_id: str, ticker: str, qty: float, sell_price: float | None = None) -> float:
-    """売却。残数を返す。0以下になれば行を削除し、履歴を記録"""
+def reduce_position(
+    user_id: str, ticker: str, qty: float, sell_price: float | None = None
+) -> tuple[float, float, float | None]:
+    """売却。(残数, 約定価格, 実現損益) を返す。0以下になれば行を削除し、履歴を記録"""
     client = get_client()
     row = (
         client.table("portfolio")
@@ -69,17 +71,19 @@ def reduce_position(user_id: str, ticker: str, qty: float, sell_price: float | N
         client.table("portfolio").update({"qty": remaining}).eq("user_id", user_id).eq("ticker", ticker).execute()
 
     # 売買履歴を記録
-    pnl = (sell_price - avg_cost) * qty if sell_price else None
+    exec_price = float(sell_price) if sell_price else avg_cost
+    pnl = (exec_price - avg_cost) * qty if sell_price else None
+    pnl_rounded = round(pnl, 0) if pnl is not None else None
     client.table("trade_history").insert({
         "user_id": user_id,
         "ticker":  ticker,
         "side":    "sell",
         "qty":     qty,
-        "price":   sell_price or avg_cost,
-        "pnl":     round(pnl, 0) if pnl is not None else None,
+        "price":   exec_price,
+        "pnl":     pnl_rounded,
     }).execute()
 
-    return remaining
+    return remaining, exec_price, pnl_rounded
 
 
 def record_buy(user_id: str, ticker: str, qty: float, cost: float) -> None:

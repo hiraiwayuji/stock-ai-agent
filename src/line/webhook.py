@@ -39,6 +39,11 @@ from src.db.storage import upload_chart, chart_filename
 from src.ai.daily_report import build_daily_report, format_daily_report_messages
 from src.stock.earnings_calendar import check_earnings_alerts, format_earnings_message
 from src.news.ticker_news import scan_ticker_news, format_ticker_news_message
+from src.db.groups import (
+    create_group, join_by_invite_code, get_group_by_line_id,
+    list_user_groups, list_group_members,
+    share_trade, post_comment, fetch_timeline, ranking,
+)
 
 load_dotenv()
 log = logging.getLogger(__name__)
@@ -137,32 +142,58 @@ def _handle_command(user_id: str, text: str) -> str:
 
     # ---- ポートフォリオ管理 ----
     if cmd == "/buy":
-        # /buy <ticker> <単価> <株数> [メモ]
-        if len(parts) < 4:
+        # /buy <ticker> <単価> <株数> [メモ...]
+        full_parts = text.strip().split(maxsplit=4)
+        if len(full_parts) < 4:
             return "使い方: /buy <ticker> <単価> <株数>\n例: /buy 7203.T 3200 100"
         try:
-            ticker = parts[1].upper()
-            cost   = float(parts[2])
-            qty    = float(parts[3])
-            note   = parts[4] if len(parts) > 4 else ""
+            ticker = full_parts[1].upper()
+            cost   = float(full_parts[2])
+            qty    = float(full_parts[3])
+            note   = full_parts[4] if len(full_parts) > 4 else ""
             add_position(user_id, ticker, qty, cost, note)
-            return (
+            msg = (
                 f"✅ {ticker} 購入登録\n"
                 f"  {qty:.0f}株 × ¥{cost:,.0f} = ¥{cost*qty:,.0f}"
             )
+            try:
+                gs = list_user_groups(user_id)
+                if gs:
+                    for g in gs:
+                        share_trade(g.id, user_id, ticker, "buy", qty, cost, None, f"自動共有: {note}" if note else "自動共有")
+                    msg += f"\n📣 {len(gs)}グループに共有"
+            except Exception as e:
+                log.warning(f"Auto share error: {e}")
+            return msg
         except Exception as e:
             return f"⚠️ エラー: {e}"
 
     if cmd == "/sell":
-        # /sell <ticker> <株数>
-        if len(parts) < 3:
-            return "使い方: /sell <ticker> <株数>\n例: /sell 7203.T 50"
+        # /sell <ticker> <株数> [単価] [メモ...]
+        full_parts = text.strip().split(maxsplit=4)
+        if len(full_parts) < 3:
+            return "使い方: /sell <ticker> <株数> [単価]\n例: /sell 7203.T 50 3500"
         try:
-            ticker    = parts[1].upper()
-            qty       = float(parts[2])
-            remaining = reduce_position(user_id, ticker, qty)
-            msg = f"✅ {ticker} {qty:.0f}株 売却"
+            ticker    = full_parts[1].upper()
+            qty       = float(full_parts[2])
+            sell_price = float(full_parts[3]) if len(full_parts) > 3 else None
+            note       = full_parts[4] if len(full_parts) > 4 else ""
+            remaining, exec_price, pnl = reduce_position(user_id, ticker, qty, sell_price)
+            msg = f"✅ {ticker} {qty:.0f}株 売却 @¥{exec_price:,.0f}"
+            if pnl is not None:
+                msg += f"\n実現損益: ¥{pnl:+,.0f}"
             msg += f"\n残: {remaining:.0f}株" if remaining > 0 else "\n（全売却）"
+            try:
+                gs = list_user_groups(user_id)
+                if gs:
+                    for g in gs:
+                        share_trade(
+                            g.id, user_id, ticker, "sell", qty,
+                            exec_price, pnl, note or "自動共有",
+                        )
+                    msg += f"\n📣 {len(gs)}グループに共有"
+            except Exception as e:
+                log.warning(f"Auto share error: {e}")
             return msg
         except Exception as e:
             return f"⚠️ {e}"
@@ -430,6 +461,111 @@ def _handle_command(user_id: str, text: str) -> str:
             push_flex(user_id, f"{year}年{month}月 目標進捗", build_goal_flex(p))
             return format_goal_message(p)
 
+    # ===== グループ共有 (Step11) =====
+    # /group create <名前>     — 新規グループ作成（仮想グループ）
+    # /group join <招待コード> — 既存グループに参加
+    # /group list              — 所属グループ一覧
+    # /group members           — メンバー一覧（最初のグループ）
+    # /share <ticker> <side> <qty> <price> [pnl] [コメント]
+    # /wall [件数]             — in-app タイムライン閲覧
+    # /comment <本文>          — タイムラインにコメント
+    # /ranking [日数]          — グループ内損益ランキング
+    if cmd == "/group":
+        sub = parts[1].lower() if len(parts) > 1 else "list"
+        if sub == "create":
+            if len(parts) < 3:
+                return "使い方: /group create <グループ名>"
+            g = create_group(parts[2], user_id)
+            return (f"✅ グループ「{g.name}」を作成\n"
+                    f"招待コード: {g.invite_code}\n"
+                    f"メンバーに共有してください。\n"
+                    f"参加は /group join {g.invite_code}")
+        if sub == "join":
+            if len(parts) < 3:
+                return "使い方: /group join <招待コード>"
+            g = join_by_invite_code(parts[2], user_id)
+            if not g:
+                return "⚠️ 招待コードが見つかりません"
+            return f"✅ 「{g.name}」に参加しました"
+        if sub == "list":
+            gs = list_user_groups(user_id)
+            if not gs:
+                return "所属グループがありません。\n/group create <名前> で作成できます。"
+            return "👥 所属グループ\n" + "\n".join(
+                f"• {g.name} (コード: {g.invite_code})" for g in gs
+            )
+        if sub == "members":
+            gs = list_user_groups(user_id)
+            if not gs:
+                return "所属グループがありません。"
+            members = list_group_members(gs[0].id)
+            lines = [f"👥 {gs[0].name} メンバー ({len(members)}人)"]
+            for m in members:
+                lines.append(f"• {m.get('nickname') or m['user_id'][:8]}")
+            return "\n".join(lines)
+        return "使い方: /group create|join|list|members"
+
+    if cmd == "/share":
+        if len(parts) < 5:
+            return "使い方: /share <ticker> <buy|sell> <株数> <価格> [pnl] [コメント]"
+        gs = list_user_groups(user_id)
+        if not gs:
+            return "⚠️ グループ未所属。/group create または /group join してください"
+        try:
+            ticker = parts[1].upper()
+            side   = parts[2].lower()
+            qty    = float(parts[3])
+            price  = float(parts[4])
+            pnl    = float(parts[5]) if len(parts) > 5 else None
+            cmt    = parts[6] if len(parts) > 6 else None
+            share_trade(gs[0].id, user_id, ticker, side, qty, price, pnl, cmt)
+            return f"📣 {gs[0].name} に売買共有しました\n{side.upper()} {ticker} {qty}株 @¥{price:,.0f}"
+        except Exception as e:
+            return f"⚠️ 共有エラー: {e}"
+
+    if cmd == "/wall":
+        gs = list_user_groups(user_id)
+        if not gs:
+            return "⚠️ グループ未所属"
+        limit = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 10
+        msgs = fetch_timeline(gs[0].id, limit=limit)
+        if not msgs:
+            return f"📜 {gs[0].name} のタイムラインは空です"
+        lines = [f"📜 {gs[0].name} タイムライン"]
+        for m in msgs:
+            icon = {"trade": "💹", "comment": "💬", "system": "🔔"}.get(m["kind"], "•")
+            who  = m["user_id"][:6]
+            lines.append(f"{icon} [{who}] {m.get('body','')}")
+        return "\n".join(lines)
+
+    if cmd == "/comment":
+        if len(parts) < 2:
+            return "使い方: /comment <本文>"
+        gs = list_user_groups(user_id)
+        if not gs:
+            return "⚠️ グループ未所属"
+        body = text.split(maxsplit=1)[1]
+        post_comment(gs[0].id, user_id, body)
+        return "💬 コメント投稿しました"
+
+    if cmd == "/ranking":
+        gs = list_user_groups(user_id)
+        if not gs:
+            return "⚠️ グループ未所属"
+        days = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 30
+        rows = ranking(gs[0].id, period_days=days)
+        if not rows:
+            return f"🏁 {gs[0].name} 直近{days}日の共有売買はまだありません"
+        medals = ["🥇", "🥈", "🥉"]
+        lines = [f"🏆 {gs[0].name} ランキング (直近{days}日)"]
+        for i, r in enumerate(rows[:10]):
+            m = medals[i] if i < 3 else f"{i+1}."
+            lines.append(
+                f"{m} {r['user_id'][:6]}  ¥{r['pnl']:+,.0f}  "
+                f"{r['trades']}回 / 勝率{r['winrate']:.0f}%"
+            )
+        return "\n".join(lines)
+
     if cmd == "/help":
         return (
             "📖 コマンド一覧\n\n"
@@ -473,11 +609,77 @@ def _handle_command(user_id: str, text: str) -> str:
             "/ml <ticker> [日数]    ML上昇確率予測\n"
             "/score <ticker>        4軸スコアリング\n"
             "/optimize [top_n]      ウォッチリスト最適化\n"
-            "/audit                 既存ウォッチリスト監査\n"
+            "/audit                 既存ウォッチリスト監査\n\n"
+            "【グループ共有】\n"
+            "/group create <名前>   グループ作成\n"
+            "/group join <コード>   招待コードで参加\n"
+            "/group list            所属グループ一覧\n"
+            "/share <t> <side> <qty> <price> [pnl] [コメント]\n"
+            "                       売買を共有\n"
+            "/wall [件数]           タイムライン閲覧\n"
+            "/comment <本文>        コメント投稿\n"
+            "/ranking [日数]        グループ損益ランキング\n"
         )
 
     # フォールバック: 何でもAI相談
     return analyze("", text)
+
+
+def _handle_group_command(event, text: str) -> str:
+    """
+    LINE グループチャット用ハンドラ
+    方針: 個人のAI秘書機能はここでは動かさない。
+          大きなお知らせ（ランキング・グループ登録・重大アラート）だけ返し、
+          その他の売買共有・コメントは in-app (/wall /share /comment) に誘導する。
+    """
+    line_group_id = getattr(event.source, "group_id", None)
+    user_id = event.source.user_id
+    if not line_group_id:
+        return ""
+
+    parts = text.strip().split(maxsplit=2)
+    cmd = parts[0].lower() if parts else ""
+
+    # グループを Supabase に同期（初回発話時に自動登録）
+    g = get_group_by_line_id(line_group_id)
+    if g is None and cmd in ("/group", "/register", "/ranking"):
+        name = parts[2] if cmd == "/register" and len(parts) > 2 else "LINEグループ"
+        g = create_group(name=name, owner_id=user_id, line_group_id=line_group_id)
+        return (f"✅ このLINEグループを「{g.name}」として登録しました\n"
+                f"招待コード: {g.invite_code}\n"
+                f"個別の売買共有・コメントはツール内チャット (/wall /share /comment) を\n"
+                f"個人メッセージで送ってください。")
+
+    if g is None:
+        # 未登録グループでの一般発話は静かに無視（ノイズ防止）
+        return ""
+
+    if cmd == "/ranking":
+        days = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 30
+        rows = ranking(g.id, period_days=days)
+        if not rows:
+            return f"🏁 直近{days}日の共有売買はまだありません"
+        medals = ["🥇", "🥈", "🥉"]
+        lines = [f"🏆 {g.name} ランキング (直近{days}日)"]
+        for i, r in enumerate(rows[:10]):
+            m = medals[i] if i < 3 else f"{i+1}."
+            lines.append(
+                f"{m} {r['user_id'][:6]}  ¥{r['pnl']:+,.0f}  "
+                f"{r['trades']}回 / 勝率{r['winrate']:.0f}%"
+            )
+        return "\n".join(lines)
+
+    if cmd == "/help":
+        return (
+            "👥 グループで使えるのは「大きなお知らせ」系のみです:\n"
+            "/ranking [日数]   損益ランキング\n"
+            "/register <名前>  このグループの表示名変更\n\n"
+            "個別の売買共有・コメント・分析は個人チャットで:\n"
+            "/share /wall /comment /check /port など"
+        )
+
+    # それ以外はノイズ削減のため無応答
+    return ""
 
 
 @app.post("/webhook")
@@ -494,13 +696,18 @@ async def webhook(request: Request):
         if isinstance(event, MessageEvent) and isinstance(event.message, TextMessageContent):
             user_id = event.source.user_id
             text = event.message.text
-            log.info(f"[LINE] user={user_id} text={text!r}")
+            src_type = getattr(event.source, "type", "user")
+            log.info(f"[LINE] src={src_type} user={user_id} text={text!r}")
             try:
-                reply_text = _handle_command(user_id, text)
+                if src_type == "group":
+                    reply_text = _handle_group_command(event, text)
+                else:
+                    reply_text = _handle_command(user_id, text)
             except Exception as e:
                 log.error(f"Command error: {e}")
                 reply_text = "⚠️ エラーが発生しました。しばらくしてから再試行してください。"
-            _reply(event.reply_token, reply_text)
+            if reply_text:
+                _reply(event.reply_token, reply_text)
 
     return {"status": "ok"}
 

@@ -86,3 +86,60 @@ CREATE TABLE IF NOT EXISTS investment_goals (
 );
 
 ALTER TABLE investment_goals ENABLE ROW LEVEL SECURITY;
+
+-- =============================================
+-- Step11: グループ共有機能
+-- =============================================
+
+-- グループ（LINEグループ or 仮想グループ）
+CREATE TABLE IF NOT EXISTS groups (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name         TEXT NOT NULL,
+  line_group_id TEXT UNIQUE,               -- LINE グループID (event.source.group_id)
+  invite_code  TEXT UNIQUE NOT NULL,       -- 6桁招待コード
+  owner_id     TEXT NOT NULL,              -- 作成者 user_id
+  created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- グループメンバー
+CREATE TABLE IF NOT EXISTS group_members (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id   UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  user_id    TEXT NOT NULL,
+  nickname   TEXT,
+  joined_at  TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (group_id, user_id)
+);
+
+-- 売買共有（trade_history からグループに共有されたもの）
+CREATE TABLE IF NOT EXISTS trade_shares (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id   UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  user_id    TEXT NOT NULL,
+  ticker     TEXT NOT NULL,
+  side       TEXT NOT NULL CHECK (side IN ('buy','sell')),
+  qty        NUMERIC NOT NULL,
+  price      NUMERIC NOT NULL,
+  pnl        NUMERIC,
+  comment    TEXT,
+  shared_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- グループ内チャット（in-app タイムライン）
+CREATE TABLE IF NOT EXISTS group_messages (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id   UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  user_id    TEXT NOT NULL,
+  kind       TEXT NOT NULL DEFAULT 'comment',  -- 'comment' | 'trade' | 'system'
+  body       TEXT,
+  ref_trade_id UUID REFERENCES trade_shares(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_trade_shares_group   ON trade_shares (group_id, shared_at DESC);
+CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages (group_id, created_at DESC);
+
+ALTER TABLE groups         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE group_members  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trade_shares   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE group_messages ENABLE ROW LEVEL SECURITY;
