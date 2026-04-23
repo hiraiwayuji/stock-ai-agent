@@ -8,10 +8,13 @@ st.set_page_config(page_title="Stock AI Agent — Group Dashboard", page_icon="�
 
 load_dotenv()
 
-# Streamlit Cloud Secret handling
-if hasattr(st, "secrets") and "SUPABASE_URL" in st.secrets:
-    os.environ["SUPABASE_URL"] = st.secrets["SUPABASE_URL"]
-    os.environ["SUPABASE_SERVICE_ROLE_KEY"] = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
+# Streamlit Cloud Secret handling (secrets.toml 未設定でも起動できるようガード)
+try:
+    if "SUPABASE_URL" in st.secrets:
+        os.environ["SUPABASE_URL"] = st.secrets["SUPABASE_URL"]
+        os.environ["SUPABASE_SERVICE_ROLE_KEY"] = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
+except Exception:
+    pass  # ローカル .env にフォールバック
 
 # DB imports (Must happen after env is set)
 from src.db.supabase_client import get_client
