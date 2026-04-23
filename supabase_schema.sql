@@ -65,3 +65,24 @@ ALTER TABLE user_settings  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE alert_history  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE portfolio      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trade_history  ENABLE ROW LEVEL SECURITY;
+
+-- 投資目標テーブル
+-- yearly は month=0 で統一（NULL だと UNIQUE 制約が効かないため）
+CREATE TABLE IF NOT EXISTS investment_goals (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id        TEXT    NOT NULL,
+  goal_type      TEXT    NOT NULL CHECK (goal_type IN ('monthly', 'yearly')),
+  year           INT     NOT NULL CHECK (year >= 2020),
+  month          INT     NOT NULL DEFAULT 0
+                         CHECK (
+                           (goal_type = 'monthly' AND month BETWEEN 1 AND 12)
+                           OR (goal_type = 'yearly' AND month = 0)
+                         ),
+  target_pnl     NUMERIC(15,0) NOT NULL,   -- 整数円で管理
+  target_winrate NUMERIC(5,2)  CHECK (target_winrate BETWEEN 0 AND 100),
+  target_trades  INT           CHECK (target_trades > 0),
+  created_at     TIMESTAMPTZ   DEFAULT NOW(),
+  UNIQUE (user_id, goal_type, year, month)
+);
+
+ALTER TABLE investment_goals ENABLE ROW LEVEL SECURITY;

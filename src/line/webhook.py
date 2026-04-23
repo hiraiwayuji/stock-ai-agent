@@ -26,6 +26,9 @@ from src.stock.backtest import run_backtest, format_backtest_message
 from src.stock.strategies import STRATEGY_MAP, STRATEGY_DESCRIPTIONS
 from src.stock.ml_predictor import train_and_predict, format_ml_message
 from src.stock.watchlist_optimizer import optimize_watchlist, audit_watchlist, format_optimize_message, score_ticker
+from src.db.goals import set_goal, get_goal, get_all_goals
+from src.stock.goal_tracker import calc_goal_progress, format_goal_message
+from src.line.flex_builder import build_goal_flex
 
 load_dotenv()
 log = logging.getLogger(__name__)
@@ -301,6 +304,63 @@ def _handle_command(user_id: str, text: str) -> str:
         except Exception as e:
             return f"⚠️ 監査失敗: {e}"
 
+    if cmd == "/goal":
+        from datetime import datetime, timezone, timedelta
+        JST   = timezone(timedelta(hours=9))
+        now   = datetime.now(JST)
+        year  = now.year
+        month = now.month
+
+        sub = parts[1].lower() if len(parts) > 1 else "show"
+
+        if sub == "set":
+            # /goal set monthly|yearly <金額> [勝率] [取引数]
+            if len(parts) < 4:
+                return (
+                    "使い方:\n"
+                    "/goal set monthly <金額> [勝率%] [取引数]\n"
+                    "/goal set yearly  <金額> [勝率%] [取引数]\n"
+                    "例: /goal set monthly 50000 60 10"
+                )
+            try:
+                gtype   = parts[2].lower()
+                tpnl    = int(float(parts[3]))
+                twin    = float(parts[4]) if len(parts) > 4 else None
+                ttrades = int(parts[5])   if len(parts) > 5 else None
+                m       = month if gtype == "monthly" else None
+                set_goal(user_id, gtype, year, m, tpnl, twin, ttrades)
+                label = f"{year}年{month}月" if gtype == "monthly" else f"{year}年間"
+                msg = f"✅ {label}目標設定完了！\n目標損益: ¥{tpnl:+,.0f}"
+                if twin:    msg += f"\n目標勝率: {twin}%"
+                if ttrades: msg += f"\n目標取引数: {ttrades}回"
+                return msg
+            except Exception as e:
+                return f"⚠️ 設定エラー: {e}"
+
+        elif sub == "yearly":
+            p = calc_goal_progress(user_id, "yearly", year)
+            if not p:
+                return f"年間目標が未設定です。\n/goal set yearly <金額> で設定してください。"
+            push_flex(user_id, f"{year}年間 目標進捗", build_goal_flex(p))
+            return format_goal_message(p)
+
+        elif sub == "history":
+            goals = get_all_goals(user_id)
+            if not goals:
+                return "目標履歴がありません。"
+            lines = ["📋 目標設定履歴"]
+            for g in goals:
+                label = f"{g['year']}年{g['month']}月" if g["goal_type"] == "monthly" else f"{g['year']}年間"
+                lines.append(f"• {label}: ¥{float(g['target_pnl']):+,.0f}")
+            return "\n".join(lines)
+
+        else:  # show / monthly
+            p = calc_goal_progress(user_id, "monthly", year, month)
+            if not p:
+                return f"{year}年{month}月の目標が未設定です。\n/goal set monthly <金額> で設定してください。"
+            push_flex(user_id, f"{year}年{month}月 目標進捗", build_goal_flex(p))
+            return format_goal_message(p)
+
     if cmd == "/help":
         return (
             "📖 コマンド一覧\n\n"
@@ -326,6 +386,12 @@ def _handle_command(user_id: str, text: str) -> str:
             "/backtest <ticker> <戦略> [期間]\n"
             "  戦略: golden rsi bb macd\n"
             "/backtest <ticker> compare  全戦略比較\n\n"
+            "【目標管理】\n"
+            "/goal                     今月の目標進捗\n"
+            "/goal yearly              年間目標進捗\n"
+            "/goal set monthly <金額>  今月目標設定\n"
+            "/goal set yearly  <金額>  年間目標設定\n"
+            "/goal history             目標設定履歴\n\n"
             "【ML・最適化】\n"
             "/ml <ticker> [日数]    ML上昇確率予測\n"
             "/score <ticker>        4軸スコアリング\n"
