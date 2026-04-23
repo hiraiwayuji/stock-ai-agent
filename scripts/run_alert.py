@@ -17,6 +17,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from src.alerts.monitor import check_market_alert, check_watchlist_alerts
 from src.db.supabase_client import get_client
 from src.news.sentiment import compute_divergence, format_divergence_message
+from src.news.ticker_news import scan_ticker_news, format_ticker_news_message
+from src.stock.earnings_calendar import check_earnings_alerts, format_earnings_message
+from src.line.client import push_text
 
 USER_ID = os.environ["LINE_USER_ID"]
 DIVERGENCE_THRESHOLD = float(os.environ.get("DIVERGENCE_THRESHOLD", "2.0"))
@@ -59,6 +62,43 @@ def main():
 
     # Divergence スキャン
     scan_divergence()
+
+    # 決算アラート（朝9:00 の初回のみ実行: 分が00〜14 の場合）
+    from datetime import datetime, timezone, timedelta
+    jst_now = datetime.now(timezone(timedelta(hours=9)))
+    if jst_now.hour == 9 and jst_now.minute < 15:
+        try:
+            client = get_client()
+            wl_rows  = client.table("watchlist").select("user_id, ticker").execute().data or []
+            hld_rows = client.table("portfolio").select("user_id, ticker").execute().data or []
+            from itertools import groupby
+            users = set(r["user_id"] for r in wl_rows + hld_rows)
+            for uid in users:
+                wl  = [r["ticker"] for r in wl_rows  if r["user_id"] == uid]
+                hld = [r["ticker"] for r in hld_rows if r["user_id"] == uid]
+                alerts = check_earnings_alerts(wl, hld)
+                msg = format_earnings_message(alerts)
+                if msg:
+                    push_text(uid, msg)
+        except Exception as e:
+            log.warning(f"earnings check: {e}")
+
+    # 銘柄ニュースアラート（1時間に1回: 分が00〜14）
+    if jst_now.minute < 15:
+        try:
+            client   = get_client()
+            all_tickers = list({
+                r["ticker"] for r in
+                (client.table("watchlist").select("ticker").execute().data or []) +
+                (client.table("portfolio").select("ticker").execute().data or [])
+            })
+            if all_tickers:
+                news_items = scan_ticker_news(all_tickers, importance_threshold=0.7)
+                msg = format_ticker_news_message(news_items)
+                if msg:
+                    push_text(USER_ID, msg)
+        except Exception as e:
+            log.warning(f"ticker_news scan: {e}")
 
     log.info("アラートチェック完了")
 

@@ -36,6 +36,9 @@ from src.stock.chart_generator import (
     generate_winrate_chart,
 )
 from src.db.storage import upload_chart, chart_filename
+from src.ai.daily_report import build_daily_report, format_daily_report_messages
+from src.stock.earnings_calendar import check_earnings_alerts, format_earnings_message
+from src.news.ticker_news import scan_ticker_news, format_ticker_news_message
 
 load_dotenv()
 log = logging.getLogger(__name__)
@@ -311,6 +314,46 @@ def _handle_command(user_id: str, text: str) -> str:
         except Exception as e:
             return f"⚠️ 監査失敗: {e}"
 
+    if cmd == "/report":
+        # AI 総合デイリーレポートをオンデマンド生成
+        try:
+            from src.line.client import push_text as _push
+            report = build_daily_report(user_id)
+            msgs   = format_daily_report_messages(report)
+            for msg in msgs[1:]:   # 1通目はreplyで返すので2通目以降をpush
+                _push(user_id, msg)
+            return msgs[0] if msgs else "レポート生成失敗"
+        except Exception as e:
+            return f"⚠️ レポート生成失敗: {e}"
+
+    if cmd == "/earnings":
+        # 保有・監視銘柄の決算カレンダー確認
+        from src.db.portfolio import get_positions
+        wl  = [i["ticker"] for i in get_watchlist(user_id)]
+        hld = [p["ticker"] for p in get_positions(user_id)]
+        if not wl and not hld:
+            return "監視・保有銘柄がありません。\n/add または /buy で登録してください。"
+        try:
+            alerts = check_earnings_alerts(wl, hld, alert_days=list(range(0, 31)))
+            if not alerts:
+                return "今後30日以内に決算予定の銘柄はありません。"
+            return format_earnings_message(alerts)
+        except Exception as e:
+            return f"⚠️ 決算データ取得失敗: {e}"
+
+    if cmd == "/news":
+        # /news <ticker>  — 銘柄個別ニュース
+        if len(parts) < 2:
+            return "使い方: /news <ticker>\n例: /news 7203.T"
+        ticker = parts[1].upper()
+        try:
+            items = scan_ticker_news([ticker], importance_threshold=0.4)
+            if not items:
+                return f"{ticker} の重要ニュースは見つかりませんでした。"
+            return format_ticker_news_message(items)
+        except Exception as e:
+            return f"⚠️ ニュース取得失敗: {e}"
+
     if cmd == "/chart":
         sub = parts[1].lower() if len(parts) > 1 else "monthly"
         chart_map = {
@@ -412,6 +455,10 @@ def _handle_command(user_id: str, text: str) -> str:
             "/backtest <ticker> <戦略> [期間]\n"
             "  戦略: golden rsi bb macd\n"
             "/backtest <ticker> compare  全戦略比較\n\n"
+            "【総合レポート・ニュース】\n"
+            "/report              AI総合投資デイリーレポート\n"
+            "/earnings            保有・監視銘柄の決算カレンダー\n"
+            "/news <ticker>       銘柄個別ニュース重要度分析\n\n"
             "【グラフ】\n"
             "/chart monthly   月次損益棒グラフ\n"
             "/chart equity    累計損益カーブ\n"
