@@ -12,6 +12,8 @@ YEARLY_MONTH = 0  # yearly の month フィールドはこの値で固定
 
 def _normalize(goal_type: str, month: int | None) -> int:
     """goal_type に応じて month を正規化"""
+    if goal_type not in ("monthly", "yearly"):
+        raise ValueError(f"goal_type は 'monthly' か 'yearly': {goal_type}")
     if goal_type == "yearly":
         return YEARLY_MONTH
     if month is None or not (1 <= month <= 12):

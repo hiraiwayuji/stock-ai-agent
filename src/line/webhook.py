@@ -29,6 +29,7 @@ from src.stock.watchlist_optimizer import optimize_watchlist, audit_watchlist, f
 from src.db.goals import set_goal, get_goal, get_all_goals
 from src.stock.goal_tracker import calc_goal_progress, format_goal_message
 from src.line.flex_builder import build_goal_flex
+from src.line.client import push_flex
 
 load_dotenv()
 log = logging.getLogger(__name__)
