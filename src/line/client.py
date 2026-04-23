@@ -6,6 +6,7 @@ from linebot.v3.messaging import (
     PushMessageRequest,
     TextMessage,
     FlexMessage,
+    ImageMessage,
 )
 from dotenv import load_dotenv
 
@@ -33,4 +34,17 @@ def push_flex(user_id: str, alt_text: str, flex_contents: dict) -> None:
     api.push_message(PushMessageRequest(
         to=user_id,
         messages=[FlexMessage(type="flex", altText=alt_text, contents=flex_contents)],
+    ))
+
+
+def push_image(user_id: str, image_url: str, preview_url: str | None = None) -> None:
+    """画像をLINEプッシュ送信（Supabase Storage の公開URL を渡す）"""
+    api = _get_api()
+    api.push_message(PushMessageRequest(
+        to=user_id,
+        messages=[ImageMessage(
+            type="image",
+            original_content_url=image_url,
+            preview_image_url=preview_url or image_url,
+        )],
     ))

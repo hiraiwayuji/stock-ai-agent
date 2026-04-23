@@ -29,7 +29,13 @@ from src.stock.watchlist_optimizer import optimize_watchlist, audit_watchlist, f
 from src.db.goals import set_goal, get_goal, get_all_goals
 from src.stock.goal_tracker import calc_goal_progress, format_goal_message
 from src.line.flex_builder import build_goal_flex
-from src.line.client import push_flex
+from src.line.client import push_flex, push_image
+from src.stock.chart_generator import (
+    generate_monthly_pnl_chart,
+    generate_equity_curve,
+    generate_winrate_chart,
+)
+from src.db.storage import upload_chart, chart_filename
 
 load_dotenv()
 log = logging.getLogger(__name__)
@@ -305,6 +311,25 @@ def _handle_command(user_id: str, text: str) -> str:
         except Exception as e:
             return f"⚠️ 監査失敗: {e}"
 
+    if cmd == "/chart":
+        sub = parts[1].lower() if len(parts) > 1 else "monthly"
+        chart_map = {
+            "monthly":  (generate_monthly_pnl_chart, "月次損益グラフ",   "monthly_pnl"),
+            "equity":   (generate_equity_curve,       "エクイティカーブ", "equity"),
+            "winrate":  (generate_winrate_chart,       "勝率チャート",     "winrate"),
+        }
+        if sub not in chart_map:
+            return "使い方: /chart monthly|equity|winrate\n  monthly — 月次損益棒グラフ\n  equity  — 累計損益カーブ\n  winrate — 勝率ドーナツ"
+        gen_fn, alt, ctype = chart_map[sub]
+        try:
+            png   = gen_fn(user_id)
+            fname = chart_filename(user_id, ctype)
+            url   = upload_chart(fname, png)
+            push_image(user_id, url)
+            return f"📊 {alt} を送信しました"
+        except Exception as e:
+            return f"⚠️ グラフ生成失敗: {e}"
+
     if cmd == "/goal":
         from datetime import datetime, timezone, timedelta
         JST   = timezone(timedelta(hours=9))
@@ -387,6 +412,10 @@ def _handle_command(user_id: str, text: str) -> str:
             "/backtest <ticker> <戦略> [期間]\n"
             "  戦略: golden rsi bb macd\n"
             "/backtest <ticker> compare  全戦略比較\n\n"
+            "【グラフ】\n"
+            "/chart monthly   月次損益棒グラフ\n"
+            "/chart equity    累計損益カーブ\n"
+            "/chart winrate   勝率ドーナツ+統計\n\n"
             "【目標管理】\n"
             "/goal                     今月の目標進捗\n"
             "/goal yearly              年間目標進捗\n"
