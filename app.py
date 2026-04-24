@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 
 st.set_page_config(page_title="Stock AI Agent — Group Dashboard", page_icon="📈", layout="wide")
 
+# 未認証ユーザー向けに、マニュアルページへの誘導を表示（ダッシュボードは招待コード必須のまま）
+
 load_dotenv()
 
 # Streamlit Cloud Secret handling (secrets.toml 未設定でも起動できるようガード)
@@ -187,8 +189,9 @@ def main():
                 if not line_group_id:
                     st.info("LINEグループとの連携が行われていません。")
                 else:
-                    res_al = client.table("alert_history").select("*").eq("user_id", line_group_id).like("alert_type", "group_critical%").order("sent_at", desc=True).limit(20).execute()
-                    alerts = res_al.data or []
+                    res_al = client.table("alert_history").select("*").eq("user_id", line_group_id).order("sent_at", desc=True).limit(50).execute()
+                    raw_alerts = res_al.data or []
+                    alerts = [al for al in raw_alerts if al.get("alert_type", "").startswith("group_critical")][:20]
                     
                     if not alerts:
                         st.info("直近アラートなし ✅")
