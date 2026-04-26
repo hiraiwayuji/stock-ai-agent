@@ -232,12 +232,66 @@ def main():
 - 人気TOP3: {', '.join(popular.head(3)['銘柄'].tolist())}
 - セクター偏り: {sector_agg.loc[sector_agg['qty'].idxmax(), 'sector']} に集中
 """.strip()
-                        try:
-                            from src.ai.analyst import analyze
-                            comment = analyze(context, "このグループの保有状況の特徴・リスク・強みを3行でコメントしてください。ぼーるくん（投資初心者〜中級者）向けの親しみやすい口調で。")
-                            st.info(comment)
-                        except Exception as e:
-                            st.warning(f"AIコメント生成失敗: {e}")
+                        # --- グループトレーナー対話 ---
+                        st.markdown("### 🎤 グループトレーナーと対話")
+                        st.caption("このグループの保有状況についてトレーナーに何でも聞いてください。")
+
+                        from src.ai.analyst import analyze as _g_analyze
+
+                        group_chat_key = f"group_chat_{group_id}"
+                        if group_chat_key not in st.session_state:
+                            try:
+                                opening = _g_analyze(
+                                    context,
+                                    "このグループの保有状況の特徴・リスク・強みを3行でコメント。"
+                                    "ぼーるくん（投資初心者〜中級者）向けの親しみやすい口調で。"
+                                    "断定的な売買推奨は避け、根拠やソースを添える。"
+                                )
+                            except Exception as e:
+                                opening = f"⚠️ 初回コメント生成失敗: {e}"
+                            st.session_state[group_chat_key] = [
+                                {"role": "assistant", "content": opening},
+                            ]
+
+                        for msg in st.session_state[group_chat_key]:
+                            with st.chat_message(msg["role"], avatar="🎤" if msg["role"] == "assistant" else "👥"):
+                                st.markdown(msg["content"])
+
+                        g_user_q = st.chat_input(
+                            "グループトレーナーに質問する（例: みんなが集中してるセクターのリスクは？）",
+                            key=f"chat_input_{group_id}",
+                        )
+                        if g_user_q:
+                            st.session_state[group_chat_key].append({"role": "user", "content": g_user_q})
+                            with st.chat_message("user", avatar="👥"):
+                                st.markdown(g_user_q)
+
+                            history = st.session_state[group_chat_key][:-1]
+                            history_text = "\n".join(
+                                f"{'トレーナー' if m['role'] == 'assistant' else 'メンバー'}: {m['content']}"
+                                for m in history
+                            )
+                            full_context = (
+                                f"[このグループの保有状況]\n{context}\n\n"
+                                f"[これまでの会話]\n{history_text}"
+                            )
+                            try:
+                                with st.spinner("トレーナーが考えています..."):
+                                    answer = _g_analyze(
+                                        full_context,
+                                        g_user_q + "\n\n（親しみやすいトレーナー口調で、グループ全体の視点で、断定的売買推奨は避け、根拠・ソースを添えて簡潔に。）"
+                                    )
+                            except Exception as e:
+                                answer = f"⚠️ 応答生成失敗: {e}"
+
+                            st.session_state[group_chat_key].append({"role": "assistant", "content": answer})
+                            with st.chat_message("assistant", avatar="🎤"):
+                                st.markdown(answer)
+
+                        if st.session_state.get(group_chat_key) and len(st.session_state[group_chat_key]) > 1:
+                            if st.button("🔄 グループ会話をリセット", key=f"reset_{group_chat_key}"):
+                                del st.session_state[group_chat_key]
+                                st.rerun()
             except Exception as e:
                 st.error(f"グループ保有分析エラー: {e}")
 
