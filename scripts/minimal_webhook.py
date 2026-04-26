@@ -59,7 +59,71 @@ _parser = WebhookParser(_line_channel_secret)
 # 個人チャットの会話履歴（プロセスメモリ。再起動で消える）
 # 1ユーザー最大 20 メッセージ（=10往復）まで保持
 _chat_history: dict[str, list[dict]] = {}
+# グループチャットの会話履歴（group_id 単位、メンション時のみ）
+_group_chat_history: dict[str, list[dict]] = {}
 _MAX_HISTORY = 20
+
+# Bot 自身の userId キャッシュ（メンション判定用）
+_bot_user_id_cache: str | None = None
+
+
+def _get_bot_user_id() -> str | None:
+    """Bot 自身の userId を取得（初回 API call、以降キャッシュ）"""
+    global _bot_user_id_cache
+    if _bot_user_id_cache is not None:
+        return _bot_user_id_cache
+    try:
+        with ApiClient(_config) as api_client:
+            info = MessagingApi(api_client).get_bot_info()
+            _bot_user_id_cache = getattr(info, "user_id", None) or getattr(info, "userId", None)
+            log.info(f"Bot userId fetched: {_bot_user_id_cache[:8] if _bot_user_id_cache else 'None'}...")
+            return _bot_user_id_cache
+    except Exception as e:
+        log.warning(f"get_bot_info failed: {e}")
+        return None
+
+
+def _is_bot_mentioned(event) -> bool:
+    """LINE のメンション情報から Bot が呼ばれたかを判定。"""
+    try:
+        message = event.message
+        mention = getattr(message, "mention", None)
+        if mention is None:
+            return False
+        bot_id = _get_bot_user_id()
+        if bot_id is None:
+            return False
+        for m in (mention.mentionees or []):
+            mid = getattr(m, "user_id", None) or getattr(m, "userId", None)
+            if mid == bot_id:
+                return True
+    except Exception as e:
+        log.warning(f"_is_bot_mentioned failed: {e}")
+    return False
+
+
+def _ask_group_with_history(group_id: str, question: str) -> str:
+    """グループ単位の会話履歴を踏まえて AI に質問。"""
+    history = _group_chat_history.setdefault(group_id, [])
+    history_text = "\n".join(
+        f"{'トレーナー' if m['role'] == 'assistant' else 'メンバー'}: {m['content']}"
+        for m in history
+    )
+    context = f"[このグループでのこれまでの会話]\n{history_text}" if history else ""
+    try:
+        response = analyze(
+            context,
+            question + "\n\n（このグループ全員が見ているので、丁寧で公開向けの口調で。断定的売買推奨は避け、根拠やソースを添える。）"
+        ) or ""
+    except Exception as e:
+        log.error(f"_ask_group_with_history failed: {e}")
+        return f"⚠️ AI応答生成失敗: {e}"
+
+    history.append({"role": "user", "content": question})
+    history.append({"role": "assistant", "content": response})
+    if len(history) > _MAX_HISTORY:
+        del history[:-_MAX_HISTORY]
+    return response[:5000] if response else "⚠️ AI応答が空でした。"
 
 
 def _ask_with_history(user_id: str, question: str) -> str:
@@ -93,7 +157,7 @@ def _reply(reply_token: str, text: str) -> None:
         )
 
 
-def _handle_group_command(user_id, line_group_id, text, cmd, parts, reply_token) -> str:
+def _handle_group_command(event, user_id, line_group_id, text, cmd, parts, reply_token) -> str:
     if cmd == "/register":
         name = parts[1].strip() if len(parts) > 1 else "LINEグループ"
         existing = get_group_by_line_id(line_group_id)
@@ -132,10 +196,22 @@ def _handle_group_command(user_id, line_group_id, text, cmd, parts, reply_token)
             "📖 グループで使えるコマンド\n"
             "  /register <グループ名>  グループ登録\n"
             "  /ranking [日数]         損益ランキング\n"
+            "  /reset                  グループ会話履歴リセット\n"
             "  /help                   このヘルプ\n\n"
-            "個別の売買共有・AI相談は個人チャットで行ってください。"
+            "💬 AI相談は @株ボールシステム をメンションしてください\n"
+            "  例: @株ボールシステム トヨタの今後どう？\n\n"
+            "個別の売買登録は個人チャットで行ってください。"
         )
-    
+
+    if cmd == "/reset":
+        _group_chat_history.pop(line_group_id, None)
+        return "🔄 このグループの会話履歴をリセットしました。"
+
+    # @株ボールシステム メンション時のみ AI 応答
+    if _is_bot_mentioned(event):
+        # メンション部分を含めたまま渡す（AI に「呼ばれた」文脈を伝えるため）
+        return _ask_group_with_history(line_group_id, text)
+
     return ""  # ノイズ削減のため無応答
 
 
@@ -362,7 +438,7 @@ async def webhook(request: Request):
         
         # --- グループコンテキスト ---
         if src_type == "group" and line_group_id:
-            reply = _handle_group_command(user_id, line_group_id, text, cmd, parts, event.reply_token)
+            reply = _handle_group_command(event, user_id, line_group_id, text, cmd, parts, event.reply_token)
         elif src_type == "user":
             reply = _handle_personal_command(user_id, text, cmd, parts, event.reply_token)
         else:
