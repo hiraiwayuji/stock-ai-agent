@@ -375,9 +375,11 @@ def main():
                             else:
                                 st.dataframe(losses[["ticker", "total_pnl"]].rename(columns={"ticker": "銘柄", "total_pnl": "総損益"}))
 
-                        # --- AIコメント ---
-                        st.markdown("### 🎤 トレーナーのひと言")
-                        context = f"""
+                        # --- AIトレーナーとのチャット ---
+                        st.markdown("### 🎤 トレーナーと対話")
+                        st.caption("ポートフォリオの状況をふまえて、トレーナーに何でも聞いてください。")
+
+                        portfolio_context = f"""
 保有銘柄: {', '.join(df_my['ticker'].tolist()[:10])}
 銘柄数: {ticker_count}
 投資額: ¥{total_invested:,.0f}
@@ -387,16 +389,66 @@ def main():
 総損益: ¥{total_pnl:+,.0f}
 セクター偏り: {sec_agg.loc[sec_agg['invested'].idxmax(), 'sector']}
 """.strip()
-                        try:
-                            from src.ai.analyst import analyze
-                            my_comment = analyze(
-                                context,
-                                "このポートフォリオの特徴・リスク・改善点を3行でコメント。"
-                                "ぼーるくんへの親しみやすい口調で。必ず情報ソースや根拠を添える。"
+
+                        from src.ai.analyst import analyze as _analyze
+
+                        chat_key = f"trainer_chat_{my_user_id}"
+                        # 初回オープン時にトレーナー挨拶を生成
+                        if chat_key not in st.session_state:
+                            try:
+                                opening = _analyze(
+                                    portfolio_context,
+                                    "ぼーるくんの今のポートフォリオを見て、特徴・リスク・気づきを3行で伝えてください。"
+                                    "親しみやすいトレーナー口調で。断定的な売買推奨は避け、根拠やソースを添える。"
+                                )
+                            except Exception as e:
+                                opening = f"⚠️ 初回コメント生成失敗: {e}"
+                            st.session_state[chat_key] = [
+                                {"role": "assistant", "content": opening},
+                            ]
+
+                        # 過去の会話を表示
+                        for msg in st.session_state[chat_key]:
+                            with st.chat_message(msg["role"], avatar="🎤" if msg["role"] == "assistant" else "🏐"):
+                                st.markdown(msg["content"])
+
+                        # ユーザー入力
+                        user_q = st.chat_input("トレーナーに質問する（例: 半導体セクターの見通しは？）")
+                        if user_q:
+                            # ユーザーメッセージ追加・即表示
+                            st.session_state[chat_key].append({"role": "user", "content": user_q})
+                            with st.chat_message("user", avatar="🏐"):
+                                st.markdown(user_q)
+
+                            # 会話履歴を含めたコンテキスト構築
+                            history = st.session_state[chat_key][:-1]  # 最新ユーザーメッセージは除く
+                            history_text = "\n".join(
+                                f"{'トレーナー' if m['role'] == 'assistant' else 'ぼーるくん'}: {m['content']}"
+                                for m in history
                             )
-                            st.info(my_comment)
-                        except Exception as e:
-                            st.warning(f"AIコメント生成失敗: {e}")
+                            full_context = (
+                                f"[ぼーるくんのポートフォリオ]\n{portfolio_context}\n\n"
+                                f"[これまでの会話]\n{history_text}"
+                            )
+
+                            try:
+                                with st.spinner("トレーナーが考えています..."):
+                                    answer = _analyze(
+                                        full_context,
+                                        user_q + "\n\n（親しみやすいトレーナー口調で、断定的売買推奨は避け、根拠・ソースを添えて簡潔に。）"
+                                    )
+                            except Exception as e:
+                                answer = f"⚠️ 応答生成失敗: {e}"
+
+                            st.session_state[chat_key].append({"role": "assistant", "content": answer})
+                            with st.chat_message("assistant", avatar="🎤"):
+                                st.markdown(answer)
+
+                        # 会話リセットボタン
+                        if st.session_state.get(chat_key) and len(st.session_state[chat_key]) > 1:
+                            if st.button("🔄 会話をリセット", key=f"reset_{chat_key}"):
+                                del st.session_state[chat_key]
+                                st.rerun()
                 except Exception as e:
                     st.error(f"取得エラー: {e}")
 
