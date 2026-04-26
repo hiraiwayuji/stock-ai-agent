@@ -1,4 +1,5 @@
 import os
+import logging
 from linebot.v3.messaging import (
     Configuration,
     ApiClient,
@@ -11,8 +12,26 @@ from linebot.v3.messaging import (
 from dotenv import load_dotenv
 
 load_dotenv()
+log = logging.getLogger(__name__)
 
-_config = Configuration(access_token=os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", ""))
+
+def _clean_env(name: str) -> str:
+    value = os.environ.get(name, "")
+    cleaned = value.strip()
+    if value != cleaned:
+        log.warning("%s had surrounding whitespace; using stripped value", name)
+    return cleaned
+
+
+def _fingerprint(value: str) -> str:
+    if not value:
+        return "missing"
+    return f"len={len(value)} first5={value[:5]} last5={value[-5:]} has_equal={'=' in value}"
+
+
+_line_access_token = _clean_env("LINE_CHANNEL_ACCESS_TOKEN")
+log.info("LINE_CHANNEL_ACCESS_TOKEN fingerprint: %s", _fingerprint(_line_access_token))
+_config = Configuration(access_token=_line_access_token)
 
 
 def _get_api() -> MessagingApi:

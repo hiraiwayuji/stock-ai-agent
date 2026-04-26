@@ -33,9 +33,28 @@ from src.ai.analyst import analyze
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
+
+def _clean_env(name: str) -> str:
+    value = os.environ.get(name, "")
+    cleaned = value.strip()
+    if value != cleaned:
+        log.warning("%s had surrounding whitespace; using stripped value", name)
+    return cleaned
+
+
+def _fingerprint(value: str) -> str:
+    if not value:
+        return "missing"
+    return f"len={len(value)} first5={value[:5]} last5={value[-5:]} has_equal={'=' in value}"
+
+
 app = FastAPI(title="Minimal LINE Webhook (Phase B: group registration)")
-_config = Configuration(access_token=os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", ""))
-_parser = WebhookParser(os.environ.get("LINE_CHANNEL_SECRET", ""))
+_line_access_token = _clean_env("LINE_CHANNEL_ACCESS_TOKEN")
+_line_channel_secret = _clean_env("LINE_CHANNEL_SECRET")
+log.info("LINE_CHANNEL_ACCESS_TOKEN fingerprint: %s", _fingerprint(_line_access_token))
+log.info("LINE_CHANNEL_SECRET fingerprint: %s", _fingerprint(_line_channel_secret))
+_config = Configuration(access_token=_line_access_token)
+_parser = WebhookParser(_line_channel_secret)
 
 # 個人チャットの会話履歴（プロセスメモリ。再起動で消える）
 # 1ユーザー最大 20 メッセージ（=10往復）まで保持
