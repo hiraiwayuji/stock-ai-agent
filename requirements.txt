@@ -4,7 +4,7 @@ httpx==0.27.0
 schedule==1.2.2
 
 # Stock Data
-yfinance==0.2.40
+yfinance>=1.3.0
 pandas>=2.0.0
 numpy>=1.24.0
 ta==0.11.0          # Technical Analysis (RSI, MACD, BB etc.)
