@@ -37,6 +37,32 @@ app = FastAPI(title="Minimal LINE Webhook (Phase B: group registration)")
 _config = Configuration(access_token=os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", ""))
 _parser = WebhookParser(os.environ.get("LINE_CHANNEL_SECRET", ""))
 
+# 個人チャットの会話履歴（プロセスメモリ。再起動で消える）
+# 1ユーザー最大 20 メッセージ（=10往復）まで保持
+_chat_history: dict[str, list[dict]] = {}
+_MAX_HISTORY = 20
+
+
+def _ask_with_history(user_id: str, question: str) -> str:
+    """会話履歴を踏まえて AI に質問。応答を返し、履歴を更新。"""
+    history = _chat_history.setdefault(user_id, [])
+    history_text = "\n".join(
+        f"{'トレーナー' if m['role'] == 'assistant' else 'ぼーるくん'}: {m['content']}"
+        for m in history
+    )
+    context = f"[これまでの会話]\n{history_text}" if history else ""
+    try:
+        response = analyze(context, question) or ""
+    except Exception as e:
+        log.error(f"_ask_with_history failed: {e}")
+        return f"⚠️ AI応答生成失敗: {e}"
+
+    history.append({"role": "user", "content": question})
+    history.append({"role": "assistant", "content": response})
+    if len(history) > _MAX_HISTORY:
+        del history[:-_MAX_HISTORY]
+    return response[:5000] if response else "⚠️ AI応答が空でした。"
+
 
 def _reply(reply_token: str, text: str) -> None:
     with ApiClient(_config) as api_client:
@@ -102,12 +128,11 @@ def _handle_personal_command(user_id, text, cmd, parts, reply_token) -> str:
         if len(parts) < 2:
             return "使い方: /ask <質問>\n例: /ask 半導体セクターの見通しは？"
         question = text.split(maxsplit=1)[1]
-        try:
-            response = analyze("", question)
-            return response[:5000]  # LINE制限
-        except Exception as e:
-            log.error(f"/ask failed: {e}")
-            return f"⚠️ AI応答生成失敗: {e}"
+        return _ask_with_history(user_id, question)
+
+    if cmd == "/reset":
+        _chat_history.pop(user_id, None)
+        return "🔄 会話履歴をリセットしました。新しい質問からどうぞ。"
     
     if cmd == "/buy":
         full_parts = text.strip().split(maxsplit=4)
@@ -265,7 +290,9 @@ def _handle_personal_command(user_id, text, cmd, parts, reply_token) -> str:
         return (
             "📖 個人で使えるコマンド\n"
             "  /myid                      あなたのuser_id表示\n"
-            "  /ask <質問>                AI投資相談\n"
+            "  /ask <質問>                AI投資相談（会話履歴あり）\n"
+            "  /reset                     会話履歴をリセット\n"
+            "  ※ コマンドなしの普通の文章でもAIが応答します\n"
             "\n"
             "【監視・アラート】\n"
             "  /add <t> [指値] [変動率%]  監視登録\n"
@@ -281,15 +308,10 @@ def _handle_personal_command(user_id, text, cmd, parts, reply_token) -> str:
         )
     
     # --- 自然言語フォールバック ---
-    # コマンド (/ で始まる) ではなく、空でもないテキストは AI に流す
+    # コマンド (/ で始まる) ではなく、空でもないテキストは会話履歴付きで AI に流す
     if text and not text.startswith("/"):
-        try:
-            response = analyze("", text)
-            return response[:5000] if response else "⚠️ AI応答が空でした。もう一度お試しください。"
-        except Exception as e:
-            log.error(f"natural language fallback failed: {e}")
-            return f"⚠️ AI応答生成失敗: {e}"
-    
+        return _ask_with_history(user_id, text)
+
     return ""  # ノイズ削減のため無応答
 
 
