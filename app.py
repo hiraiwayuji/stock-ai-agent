@@ -20,8 +20,47 @@ except Exception:
 
 # DB imports (Must happen after env is set)
 from src.db.supabase_client import get_client
-from src.db.groups import ranking, fetch_timeline, list_group_members
+from src.db.groups import fetch_timeline, list_group_members
 from src.ai.personal_profile import SECTOR_MAP
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_live_price(ticker: str) -> float | None:
+    """yfinance で現在価格取得（5分キャッシュ）。失敗時 None。"""
+    try:
+        import yfinance as yf
+        t = yf.Ticker(ticker)
+        hist = t.history(period="2d", auto_adjust=False)
+        if hist.empty:
+            return None
+        return float(hist["Close"].iloc[-1])
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_realized_pnl_by_ticker(user_id: str) -> dict:
+    """trade_history から ticker ごとの実現損益を集約。"""
+    try:
+        client = get_client()
+        res = (
+            client.table("trade_history")
+            .select("ticker, pnl")
+            .eq("user_id", user_id)
+            .eq("side", "sell")
+            .execute()
+        )
+        rows = res.data or []
+        result = {}
+        for r in rows:
+            t = r.get("ticker")
+            p = float(r.get("pnl") or 0)
+            if t:
+                result[t] = result.get(t, 0.0) + p
+        return result
+    except Exception:
+        return {}
+
 
 def main():
     code = st.query_params.get("code", "")
@@ -47,64 +86,15 @@ def main():
         st.title(f"📈 {group_name}")
         st.caption(f"招待コード: {code}")
         
-        tab_rank, tab_time, tab_sec, tab_alert, tab_holdings, tab_personal = st.tabs([
-            "🏆 ランキング",
+        tab_time, tab_alert, tab_holdings, tab_personal = st.tabs([
             "📜 タイムライン",
-            "📊 セクター集計",
             "🚨 アラート履歴",
             "💼 グループ保有分析",
             "🎯 私のパネル",
         ])
         
         # ---------------------------
-        # Tab 1: Ranking
-        # ---------------------------
-        with tab_rank:
-            period_label = st.radio("集計期間", ["今月", "直近30日", "年間"], horizontal=True)
-            if period_label == "年間":
-                days = 365
-            elif period_label == "今月":
-                # 簡易的に直近30日とする
-                days = 30
-            else:
-                days = 30
-                
-            try:
-                members = list_group_members(group_id)
-                rows = ranking(group_id, period_days=days)
-                
-                total_trades = sum(r['trades'] for r in rows) if rows else 0
-                total_pnl = sum(r['pnl'] for r in rows) if rows else 0.0
-                
-                col1, col2, col3 = st.columns(3)
-                col1.metric("参加メンバー", f"{len(members)}名")
-                col2.metric("総取引数", f"{total_trades}回")
-                col3.metric("グループ合計損益", f"¥{total_pnl:+,.0f}")
-                
-                st.write("---")
-                
-                if not rows:
-                    st.info("この期間の共有売買はありません。")
-                else:
-                    medals = ["🥇", "🥈", "🥉"]
-                    df_rows = []
-                    for i, r in enumerate(rows):
-                        rank_str = medals[i] if i < 3 else f"{i+1}."
-                        df_rows.append({
-                            "順位": rank_str,
-                            "ユーザー": r['user_id'][:8], # Nicknameがあれば良いが、rankingはuser_idベース
-                            "損益 (円)": r['pnl'],
-                            "取引回数": r['trades'],
-                            "勝率 (%)": f"{r['winrate']:.1f}%"
-                        })
-                        
-                    df_rank = pd.DataFrame(df_rows)
-                    st.dataframe(df_rank, use_container_width=True)
-            except Exception as e:
-                st.error(f"ランキング取得エラー: {e}")
-
-        # ---------------------------
-        # Tab 2: Timeline
+        # Tab 1: Timeline
         # ---------------------------
         with tab_time:
             limit = st.slider("表示件数", 10, 100, 30)
@@ -136,60 +126,7 @@ def main():
                 st.error(f"タイムライン取得エラー: {e}")
 
         # ---------------------------
-        # Tab 3: Sector
-        # ---------------------------
-        with tab_sec:
-            try:
-                # Group shares
-                res_shares = client.table("trade_shares").select("*").eq("group_id", group_id).execute()
-                shares = res_shares.data or []
-                
-                if not shares:
-                    st.info("共有データが不足しています。")
-                else:
-                    sector_stats = {}
-                    for s in shares:
-                        if s["side"] != "sell":
-                            continue
-                        ticker = s["ticker"]
-                        pnl = float(s.get("pnl") or 0.0)
-                        sec = SECTOR_MAP.get(ticker, "その他")
-                        
-                        if sec not in sector_stats:
-                            sector_stats[sec] = {"trades": 0, "wins": 0, "pnl": 0.0}
-                        sector_stats[sec]["trades"] += 1
-                        if pnl > 0:
-                            sector_stats[sec]["wins"] += 1
-                        sector_stats[sec]["pnl"] += pnl
-                        
-                    if not sector_stats:
-                        st.info("売却共有データが不足しています。")
-                    else:
-                        sec_rows = []
-                        for sec, stats in sector_stats.items():
-                            tr = stats["trades"]
-                            wr = (stats["wins"] / tr * 100) if tr > 0 else 0
-                            apnl = stats["pnl"] / tr if tr > 0 else 0
-                            sec_rows.append({
-                                "セクター": sec,
-                                "勝率 (%)": wr,
-                                "平均損益": apnl,
-                                "取引数": tr
-                            })
-                            
-                        df_sec = pd.DataFrame(sec_rows)
-                        df_sec = df_sec.sort_values("勝率 (%)", ascending=True)
-                        
-                        fig = px.bar(df_sec, x="勝率 (%)", y="セクター", orientation="h", title="セクター別勝率")
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        st.dataframe(df_sec.sort_values("勝率 (%)", ascending=False).style.format({"勝率 (%)": "{:.1f}", "平均損益": "{:,.0f}"}), use_container_width=True)
-
-            except Exception as e:
-                st.error(f"セクター集計エラー: {e}")
-
-        # ---------------------------
-        # Tab 4: Alerts
+        # Tab 2: Alerts
         # ---------------------------
         with tab_alert:
             try:
@@ -259,6 +196,11 @@ def main():
                             .reset_index()
                         )
                         popular.columns = ["銘柄", "保有者数", "合計株数", "平均取得単価"]
+                        # 現在価格を併記
+                        with st.spinner("銘柄の現在価格を取得中..."):
+                            popular["現在価格"] = popular["銘柄"].map(
+                                lambda t: fetch_live_price(t)
+                            ).map(lambda v: f"¥{v:,.2f}" if v is not None else "—")
                         st.dataframe(popular, use_container_width=True)
                         
                         # --- セクター集中度（円グラフ）---
@@ -304,14 +246,22 @@ def main():
         # ---------------------------
         with tab_personal:
             st.subheader("🎯 私のパネル")
-            st.caption("LINE Bot に /myid と送ると取得できる、あなたの user_id を入力してください。")
-            
+            st.caption("LINE Bot に /myid と送ると取得できる、あなたの user_id を入力してください。URLに `?uid=Uxxx...` を付けると次回から自動入力されます。")
+
+            # URL ?uid= → 前回セッションの記憶 → 空 の優先順
+            url_uid = st.query_params.get("uid", "")
+            default_uid = st.session_state.get("my_user_id", "") or url_uid
+
             my_user_id = st.text_input(
                 "あなたの LINE user_id (U で始まる33文字)",
-                value="",
+                value=default_uid,
                 type="password",
                 help="LINE で株ボールシステム Bot に /myid と送信すると取得できます。"
             )
+
+            # 有効な uid なら session_state に保存（同セッション中は再入力不要）
+            if my_user_id and my_user_id.startswith("U") and len(my_user_id) == 33:
+                st.session_state["my_user_id"] = my_user_id
             
             if not my_user_id:
                 st.info("user_id を入力するとあなたの保有銘柄分析が表示されます。")
@@ -326,74 +276,124 @@ def main():
                         st.info("保有銘柄はまだありません。\nLINE Bot で /buy <ticker> <単価> <株数> と送ると登録されます。")
                     else:
                         df_my = pd.DataFrame(my_positions)
-                        
+
+                        # realized_pnl は trade_history から集約
+                        realized_map = get_realized_pnl_by_ticker(my_user_id)
+                        df_my["realized_pnl"] = df_my["ticker"].map(lambda t: realized_map.get(t, 0))
+
                         # 型調整
                         for col in ["qty", "avg_cost", "realized_pnl"]:
                             if col in df_my.columns:
                                 df_my[col] = pd.to_numeric(df_my[col], errors="coerce").fillna(0)
-                        
+
+                        # 現在価格取得
+                        with st.spinner("現在価格を取得中..."):
+                            df_my["current_price"] = df_my["ticker"].map(lambda t: fetch_live_price(t))
+
+                        # 計算
+                        df_my["invested"] = df_my["qty"] * df_my["avg_cost"]
+                        df_my["market_value"] = df_my.apply(
+                            lambda r: r["qty"] * r["current_price"] if r["current_price"] is not None else None,
+                            axis=1,
+                        )
+                        df_my["unrealized_pnl"] = df_my.apply(
+                            lambda r: (r["market_value"] - r["invested"]) if r["market_value"] is not None else None,
+                            axis=1,
+                        )
+                        df_my["unrealized_pct"] = df_my.apply(
+                            lambda r: (r["unrealized_pnl"] / r["invested"] * 100) if r["unrealized_pnl"] is not None and r["invested"] else None,
+                            axis=1,
+                        )
+
                         # --- 保有銘柄一覧 ---
                         st.markdown("### 📝 保有銘柄一覧")
-                        df_display = df_my.copy()
-                        df_display["投資額"] = df_display["qty"] * df_display["avg_cost"]
-                        st.dataframe(
-                            df_display[["ticker", "qty", "avg_cost", "投資額", "realized_pnl"]]
-                            .rename(columns={
-                                "ticker": "銘柄",
-                                "qty": "株数",
-                                "avg_cost": "取得単価",
-                                "realized_pnl": "確定損益",
-                            }),
-                            use_container_width=True,
-                        )
-                        
-                        # --- サマリー ---
-                        total_invested = (df_my["qty"] * df_my["avg_cost"]).sum()
+
+                        def _fmt_money_signed(v):
+                            return f"¥{v:+,.0f}" if v is not None and not pd.isna(v) else "—"
+
+                        def _fmt_money_abs(v):
+                            return f"¥{v:,.2f}" if v is not None and not pd.isna(v) else "—"
+
+                        def _fmt_pct(v):
+                            return f"{v:+.2f}%" if v is not None and not pd.isna(v) else "—"
+
+                        view = pd.DataFrame({
+                            "銘柄": df_my["ticker"],
+                            "株数": df_my["qty"].map(lambda x: f"{x:.0f}"),
+                            "取得単価": df_my["avg_cost"].map(_fmt_money_abs),
+                            "現在値": df_my["current_price"].map(_fmt_money_abs),
+                            "投資額": df_my["invested"].map(lambda x: f"¥{x:,.0f}"),
+                            "評価額": df_my["market_value"].map(lambda x: f"¥{x:,.0f}" if x is not None and not pd.isna(x) else "—"),
+                            "含み損益": df_my["unrealized_pnl"].map(_fmt_money_signed),
+                            "含み損益率": df_my["unrealized_pct"].map(_fmt_pct),
+                            "確定損益": df_my["realized_pnl"].map(_fmt_money_signed),
+                        })
+                        st.dataframe(view, use_container_width=True)
+
+                        # --- メトリック ---
+                        total_invested = df_my["invested"].sum()
+                        total_market = df_my["market_value"].sum(skipna=True)
+                        total_unrealized = df_my["unrealized_pnl"].sum(skipna=True)
                         total_realized = df_my["realized_pnl"].sum()
+                        total_pnl = total_unrealized + total_realized
                         ticker_count = df_my["ticker"].nunique()
-                        col1, col2, col3 = st.columns(3)
-                        col1.metric("保有銘柄数", f"{ticker_count}")
-                        col2.metric("投資額合計", f"¥{total_invested:,.0f}")
-                        col3.metric("確定損益合計", f"¥{total_realized:+,.0f}")
-                        
+
+                        cols = st.columns(5)
+                        cols[0].metric("銘柄数", f"{ticker_count}")
+                        cols[1].metric("投資額", f"¥{total_invested:,.0f}")
+                        cols[2].metric("評価額", f"¥{total_market:,.0f}")
+                        cols[3].metric(
+                            "含み損益",
+                            f"¥{total_unrealized:+,.0f}",
+                            delta=f"{(total_unrealized/total_invested*100 if total_invested else 0):+.2f}%",
+                        )
+                        cols[4].metric("総損益", f"¥{total_pnl:+,.0f}", help="含み損益+確定損益")
+
                         # --- セクター配分 ---
-                        st.markdown("### 📊 セクター配分")
+                        st.markdown("### 📊 セクター配分（投資額ベース）")
                         df_my["sector"] = df_my["ticker"].map(lambda t: SECTOR_MAP.get(t, "その他"))
-                        df_my["invested"] = df_my["qty"] * df_my["avg_cost"]
                         sec_agg = df_my.groupby("sector")["invested"].sum().reset_index()
-                        fig_my = px.pie(sec_agg, values="invested", names="sector", title="投資額ベースのセクター配分")
+                        fig_my = px.pie(sec_agg, values="invested", names="sector", title="セクター配分")
                         st.plotly_chart(fig_my, use_container_width=True)
-                        
-                        # --- 勝ち負け銘柄 ---
-                        st.markdown("### 🎖️ 得意・苦手銘柄（確定損益ベース）")
-                        wins = df_my[df_my["realized_pnl"] > 0].sort_values("realized_pnl", ascending=False).head(5)
-                        losses = df_my[df_my["realized_pnl"] < 0].sort_values("realized_pnl").head(5)
+
+                        # --- 勝ち負け銘柄（含み + 確定の総合）---
+                        st.markdown("### 🎖️ 得意・苦手銘柄（含み+確定 総合損益）")
+                        df_my["total_pnl"] = df_my["unrealized_pnl"].fillna(0) + df_my["realized_pnl"]
+                        wins = df_my[df_my["total_pnl"] > 0].sort_values("total_pnl", ascending=False).head(5)
+                        losses = df_my[df_my["total_pnl"] < 0].sort_values("total_pnl").head(5)
                         col_w, col_l = st.columns(2)
                         with col_w:
                             st.markdown("#### ✅ 得意 (TOP5)")
                             if wins.empty:
-                                st.caption("まだ確定益の銘柄がありません。")
+                                st.caption("まだプラス銘柄がありません。")
                             else:
-                                st.dataframe(wins[["ticker", "realized_pnl"]].rename(columns={"ticker": "銘柄", "realized_pnl": "確定益"}))
+                                st.dataframe(wins[["ticker", "total_pnl"]].rename(columns={"ticker": "銘柄", "total_pnl": "総損益"}))
                         with col_l:
                             st.markdown("#### ❌ 苦手 (TOP5)")
                             if losses.empty:
-                                st.caption("まだ確定損の銘柄がありません。")
+                                st.caption("まだマイナス銘柄がありません。")
                             else:
-                                st.dataframe(losses[["ticker", "realized_pnl"]].rename(columns={"ticker": "銘柄", "realized_pnl": "確定損"}))
-                        
+                                st.dataframe(losses[["ticker", "total_pnl"]].rename(columns={"ticker": "銘柄", "total_pnl": "総損益"}))
+
                         # --- AIコメント ---
                         st.markdown("### 🎤 トレーナーのひと言")
                         context = f"""
 保有銘柄: {', '.join(df_my['ticker'].tolist()[:10])}
 銘柄数: {ticker_count}
-投資額合計: ¥{total_invested:,.0f}
+投資額: ¥{total_invested:,.0f}
+評価額: ¥{total_market:,.0f}
+含み損益: ¥{total_unrealized:+,.0f}
 確定損益: ¥{total_realized:+,.0f}
-セクター偏り: {sec_agg.loc[sec_agg['invested'].idxmax(), 'sector']} に集中
+総損益: ¥{total_pnl:+,.0f}
+セクター偏り: {sec_agg.loc[sec_agg['invested'].idxmax(), 'sector']}
 """.strip()
                         try:
                             from src.ai.analyst import analyze
-                            my_comment = analyze(context, "このポートフォリオの特徴・リスク・改善点を3行でコメントしてください。ぼーるくんへの親しみやすい口調で。必ず情報ソースや根拠を添えて。")
+                            my_comment = analyze(
+                                context,
+                                "このポートフォリオの特徴・リスク・改善点を3行でコメント。"
+                                "ぼーるくんへの親しみやすい口調で。必ず情報ソースや根拠を添える。"
+                            )
                             st.info(my_comment)
                         except Exception as e:
                             st.warning(f"AIコメント生成失敗: {e}")
