@@ -25,7 +25,10 @@ from linebot.v3.messaging import (
 from linebot.v3.webhook import WebhookParser
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
-from src.db.groups import create_group, get_group_by_line_id
+from src.db.groups import get_group_by_line_id, create_group, ranking, list_user_groups, share_trade
+from src.db.portfolio import add_position, reduce_position, get_positions
+from src.db.supabase_client import upsert_watchlist, get_watchlist, get_client
+from src.ai.analyst import analyze
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -43,6 +46,251 @@ def _reply(reply_token: str, text: str) -> None:
                 messages=[TextMessage(type="text", text=text[:5000])],
             )
         )
+
+
+def _handle_group_command(user_id, line_group_id, text, cmd, parts, reply_token) -> str:
+    if cmd == "/register":
+        name = parts[1].strip() if len(parts) > 1 else "LINEグループ"
+        existing = get_group_by_line_id(line_group_id)
+        if existing:
+            return f"✅ このグループは既に「{existing.name}」として登録済みです\n招待コード: {existing.invite_code}"
+        try:
+            g = create_group(name=name, owner_id=user_id, line_group_id=line_group_id)
+            return f"✅ このLINEグループを「{g.name}」として登録しました\n招待コード: {g.invite_code}\nSupabase に line_group_id を保存しました"
+        except Exception as e:
+            log.error(f"create_group failed: {e}")
+            return f"⚠️ 登録エラー: {e}"
+
+    if cmd == "/ranking":
+        g = get_group_by_line_id(line_group_id)
+        if g is None:
+            return "⚠️ このグループは未登録です。/register <グループ名> で登録してください"
+        try:
+            days = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 30
+        except Exception:
+            days = 30
+        rows = ranking(g.id, period_days=days)
+        if not rows:
+            return f"🏁 {g.name} 直近{days}日の共有売買はまだありません"
+        medals = ["🥇", "🥈", "🥉"]
+        lines = [f"🏆 {g.name} ランキング (直近{days}日)"]
+        for i, r in enumerate(rows[:10]):
+            m = medals[i] if i < 3 else f"{i+1}."
+            lines.append(
+                f"{m} {r['user_id'][:6]}  ¥{r['pnl']:+,.0f}  "
+                f"{r['trades']}回 / 勝率{r['winrate']:.0f}%"
+            )
+        return "\n".join(lines)
+
+    if cmd == "/help":
+        return (
+            "📖 グループで使えるコマンド\n"
+            "  /register <グループ名>  グループ登録\n"
+            "  /ranking [日数]         損益ランキング\n"
+            "  /help                   このヘルプ\n\n"
+            "個別の売買共有・AI相談は個人チャットで行ってください。"
+        )
+    
+    return ""  # ノイズ削減のため無応答
+
+
+def _handle_personal_command(user_id, text, cmd, parts, reply_token) -> str:
+    if cmd == "/myid":
+        return f"あなたのuser_id:\n{user_id}"
+    
+    if cmd == "/ask":
+        if len(parts) < 2:
+            return "使い方: /ask <質問>\n例: /ask 半導体セクターの見通しは？"
+        question = text.split(maxsplit=1)[1]
+        try:
+            response = analyze("", question)
+            return response[:5000]  # LINE制限
+        except Exception as e:
+            log.error(f"/ask failed: {e}")
+            return f"⚠️ AI応答生成失敗: {e}"
+    
+    if cmd == "/buy":
+        full_parts = text.strip().split(maxsplit=4)
+        if len(full_parts) < 4:
+            return "使い方: /buy <ticker> <単価> <株数> [メモ]\n例: /buy NVDA 130 10"
+        try:
+            ticker = full_parts[1].upper()
+            cost = float(full_parts[2])
+            qty = float(full_parts[3])
+            note = full_parts[4] if len(full_parts) > 4 else ""
+            add_position(user_id, ticker, qty, cost, note)
+            msg = (
+                f"✅ {ticker} 購入登録\n"
+                f"  {qty:.0f}株 × ¥{cost:,.0f} = ¥{qty*cost:,.0f}"
+            )
+            # 自動グループ共有
+            try:
+                gs = list_user_groups(user_id)
+                if gs:
+                    for g in gs:
+                        share_trade(
+                            g.id, user_id, ticker, "buy", qty, cost, None,
+                            f"自動共有: {note}" if note else "自動共有",
+                        )
+                    msg += f"\n📣 {len(gs)}グループに共有"
+            except Exception as e:
+                log.warning(f"auto share error: {e}")
+            return msg
+        except Exception as e:
+            return f"⚠️ エラー: {e}"
+
+    if cmd == "/sell":
+        full_parts = text.strip().split(maxsplit=4)
+        if len(full_parts) < 3:
+            return "使い方: /sell <ticker> <株数> [単価]\n例: /sell NVDA 5 145"
+        try:
+            ticker = full_parts[1].upper()
+            qty = float(full_parts[2])
+            sell_price = float(full_parts[3]) if len(full_parts) > 3 else None
+            note = full_parts[4] if len(full_parts) > 4 else ""
+            remaining, exec_price, pnl = reduce_position(user_id, ticker, qty, sell_price)
+            msg = f"✅ {ticker} {qty:.0f}株 売却 @¥{exec_price:,.0f}"
+            if pnl is not None:
+                msg += f"\n実現損益: ¥{pnl:+,.0f}"
+            msg += f"\n残: {remaining:.0f}株" if remaining > 0 else "\n（全売却）"
+            # 自動グループ共有
+            try:
+                gs = list_user_groups(user_id)
+                if gs:
+                    for g in gs:
+                        share_trade(
+                            g.id, user_id, ticker, "sell", qty,
+                            exec_price, pnl, note or "自動共有",
+                        )
+                    msg += f"\n📣 {len(gs)}グループに共有"
+            except Exception as e:
+                log.warning(f"auto share error: {e}")
+            return msg
+        except Exception as e:
+            return f"⚠️ エラー: {e}"
+
+    if cmd == "/port":
+        try:
+            positions = get_positions(user_id)
+            if not positions:
+                return "📊 保有銘柄なし\n/buy <ticker> <単価> <株数> で登録できます。"
+            lines = ["📊 あなたの保有銘柄"]
+            total_invested = 0.0
+            total_realized = 0.0
+            for p in positions:
+                ticker = p.get("ticker", "")
+                qty = float(p.get("qty") or 0)
+                avg_cost = float(p.get("avg_cost") or 0)
+                realized_pnl = float(p.get("realized_pnl") or 0)
+                invested = qty * avg_cost
+                total_invested += invested
+                total_realized += realized_pnl
+                lines.append(
+                    f"• {ticker}: {qty:.0f}株 @¥{avg_cost:,.0f}"
+                    f" (投資¥{invested:,.0f}, 確定損益¥{realized_pnl:+,.0f})"
+                )
+            lines.append("")
+            lines.append(f"合計投資額: ¥{total_invested:,.0f}")
+            lines.append(f"確定損益合計: ¥{total_realized:+,.0f}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"⚠️ エラー: {e}"
+
+    if cmd == "/add":
+        full_parts = text.strip().split()
+        if len(full_parts) < 2:
+            return (
+                "使い方: /add <ticker> [指値] [変動率%]\n"
+                "例:\n"
+                "  /add NVDA            (デフォルト: 前日比±5%変動でアラート)\n"
+                "  /add NVDA 140        (価格140に接近でアラート)\n"
+                "  /add NVDA 140 3      (140接近 or ±3%変動)"
+            )
+        try:
+            ticker = full_parts[1].upper()
+            alert_price = float(full_parts[2]) if len(full_parts) > 2 else None
+            alert_pct = float(full_parts[3]) if len(full_parts) > 3 else None
+            upsert_watchlist(user_id, ticker, alert_price=alert_price, alert_pct=alert_pct)
+            msg = f"✅ {ticker} を監視リストに追加しました"
+            if alert_price:
+                msg += f"\n  指値: ¥{alert_price:,.2f}"
+            if alert_pct:
+                msg += f"\n  変動率: ±{alert_pct}%"
+            if not alert_price and not alert_pct:
+                msg += "\n  (デフォルト ±5% でアラート)"
+            return msg
+        except ValueError:
+            return "⚠️ 数値が不正です。/add <ticker> [指値] [変動率%]"
+        except Exception as e:
+            return f"⚠️ エラー: {e}"
+
+    if cmd == "/list":
+        try:
+            items = get_watchlist(user_id)
+            if not items:
+                return (
+                    "📋 監視銘柄はまだ登録されていません。\n"
+                    "/add <ticker> [指値] で追加できます。"
+                )
+            lines = ["📋 監視銘柄リスト"]
+            for item in items:
+                ticker = item.get("ticker", "?")
+                line = f"• {ticker}"
+                ap = item.get("alert_price")
+                pp = item.get("alert_pct")
+                if ap:
+                    line += f"  指値:¥{float(ap):,.2f}"
+                if pp:
+                    line += f"  ±{float(pp):.1f}%"
+                lines.append(line)
+            lines.append("")
+            lines.append("削除: /unwatch <ticker>")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"⚠️ エラー: {e}"
+
+    if cmd == "/unwatch":
+        full_parts = text.strip().split()
+        if len(full_parts) < 2:
+            return "使い方: /unwatch <ticker>\n例: /unwatch NVDA"
+        try:
+            ticker = full_parts[1].upper()
+            client = get_client()
+            client.table("watchlist").delete().eq("user_id", user_id).eq("ticker", ticker).execute()
+            return f"✅ {ticker} を監視リストから削除しました"
+        except Exception as e:
+            return f"⚠️ エラー: {e}"
+
+    if cmd == "/help":
+        return (
+            "📖 個人で使えるコマンド\n"
+            "  /myid                      あなたのuser_id表示\n"
+            "  /ask <質問>                AI投資相談\n"
+            "\n"
+            "【監視・アラート】\n"
+            "  /add <t> [指値] [変動率%]  監視登録\n"
+            "  /list                      監視一覧\n"
+            "  /unwatch <t>               監視解除\n"
+            "\n"
+            "【ポートフォリオ】\n"
+            "  /buy <t> <単価> <株数>     購入登録\n"
+            "  /sell <t> <株数> [単価]    売却登録\n"
+            "  /port                      保有サマリー\n"
+            "\n"
+            "  /help                      このヘルプ"
+        )
+    
+    # --- 自然言語フォールバック ---
+    # コマンド (/ で始まる) ではなく、空でもないテキストは AI に流す
+    if text and not text.startswith("/"):
+        try:
+            response = analyze("", text)
+            return response[:5000] if response else "⚠️ AI応答が空でした。もう一度お試しください。"
+        except Exception as e:
+            log.error(f"natural language fallback failed: {e}")
+            return f"⚠️ AI応答生成失敗: {e}"
+    
+    return ""  # ノイズ削減のため無応答
 
 
 @app.post("/webhook")
@@ -67,36 +315,23 @@ async def webhook(request: Request):
 
         log.info(f"[LINE] src={src_type} group_id={line_group_id!r} user={user_id!r} text={text!r}")
 
-        # ケース1: グループで /register
-        if src_type == "group" and line_group_id and text.startswith("/register"):
-            parts = text.split(maxsplit=1)
-            name = parts[1].strip() if len(parts) > 1 else "LINEグループ"
-
-            existing = get_group_by_line_id(line_group_id)
-            if existing:
-                _reply(
-                    event.reply_token,
-                    f"✅ このグループは既に「{existing.name}」として登録済みです\n"
-                    f"招待コード: {existing.invite_code}",
-                )
-            else:
-                try:
-                    g = create_group(name=name, owner_id=user_id, line_group_id=line_group_id)
-                    _reply(
-                        event.reply_token,
-                        f"✅ このLINEグループを「{g.name}」として登録しました\n"
-                        f"招待コード: {g.invite_code}\n"
-                        f"Supabase に line_group_id を保存しました",
-                    )
-                except Exception as e:
-                    log.error(f"create_group failed: {e}")
-                    _reply(event.reply_token, f"⚠️ 登録エラー: {e}")
-
-        # ケース2: 個人チャットで /myid
-        elif src_type == "user" and text == "/myid":
-            _reply(event.reply_token, f"あなたのuser_id:\n{user_id}")
-
-        # ケース3: それ以外は無応答（ノイズ削減）
+        # --- コマンド解析 ---
+        parts = text.split(maxsplit=2)
+        cmd = parts[0].lower() if parts else ""
+        
+        # --- グループコンテキスト ---
+        if src_type == "group" and line_group_id:
+            reply = _handle_group_command(user_id, line_group_id, text, cmd, parts, event.reply_token)
+        elif src_type == "user":
+            reply = _handle_personal_command(user_id, text, cmd, parts, event.reply_token)
+        else:
+            reply = ""
+        
+        if reply:
+            try:
+                _reply(event.reply_token, reply)
+            except Exception as e:
+                log.error(f"reply failed: {e}")
 
     return {"status": "ok"}
 

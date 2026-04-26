@@ -17,14 +17,15 @@ class Position:
 def add_position(user_id: str, ticker: str, qty: float, cost: float, note: str = "") -> None:
     """保有ポジション追加 / 平均コスト自動計算でupsert"""
     client = get_client()
-    existing = (
+    res = (
         client.table("portfolio")
-        .select("qty, avg_cost")
+        .select("qty, avg_cost, note")
         .eq("user_id", user_id)
         .eq("ticker", ticker)
         .maybe_single()
         .execute()
-    ).data
+    )
+    existing = res.data if res is not None else None
 
     if existing:
         old_qty  = float(existing["qty"])
@@ -51,14 +52,15 @@ def reduce_position(
 ) -> tuple[float, float, float | None]:
     """売却。(残数, 約定価格, 実現損益) を返す。0以下になれば行を削除し、履歴を記録"""
     client = get_client()
-    row = (
+    res = (
         client.table("portfolio")
         .select("qty, avg_cost")
         .eq("user_id", user_id)
         .eq("ticker", ticker)
         .maybe_single()
         .execute()
-    ).data
+    )
+    row = res.data if res is not None else None
     if not row:
         raise ValueError(f"{ticker} はポートフォリオに存在しません")
 

@@ -47,7 +47,14 @@ def main():
         st.title(f"📈 {group_name}")
         st.caption(f"招待コード: {code}")
         
-        tab_rank, tab_time, tab_sec, tab_alert = st.tabs(["🏆 ランキング", "📜 タイムライン", "📊 セクター集計", "🚨 アラート履歴"])
+        tab_rank, tab_time, tab_sec, tab_alert, tab_holdings, tab_personal = st.tabs([
+            "🏆 ランキング",
+            "📜 タイムライン",
+            "📊 セクター集計",
+            "🚨 アラート履歴",
+            "💼 グループ保有分析",
+            "🎯 私のパネル",
+        ])
         
         # ---------------------------
         # Tab 1: Ranking
@@ -203,6 +210,195 @@ def main():
                                 st.error(al.get("message", ""))
             except Exception as e:
                 st.error(f"アラート履歴取得エラー: {e}")
+
+        # ---------------------------
+        # Tab 5: Group Holdings
+        # ---------------------------
+        with tab_holdings:
+            st.subheader(f"{group_name} メンバーの保有銘柄集約")
+            try:
+                members = list_group_members(group_id)
+                if not members:
+                    st.info("メンバーがまだいません。")
+                else:
+                    # 全メンバーの保有銘柄を収集
+                    from src.db.portfolio import get_positions
+                    all_positions = []
+                    for m in members:
+                        uid = m.get("user_id") if isinstance(m, dict) else getattr(m, "user_id", None)
+                        nick = m.get("nickname") if isinstance(m, dict) else getattr(m, "nickname", None)
+                        if not uid:
+                            continue
+                        positions = get_positions(uid)
+                        for p in positions:
+                            all_positions.append({
+                                "ticker": p.get("ticker"),
+                                "qty": float(p.get("qty") or 0),
+                                "avg_cost": float(p.get("avg_cost") or 0),
+                                "realized_pnl": float(p.get("realized_pnl") or 0),
+                                "user_id": uid,
+                                "nickname": nick or uid[:6],
+                            })
+                    
+                    if not all_positions:
+                        st.info("まだ誰も保有銘柄を登録していません。\nLINE Bot で /buy <ticker> <単価> <株数> コマンドを使うと登録されます。")
+                    else:
+                        df_pos = pd.DataFrame(all_positions)
+                        
+                        # --- 人気銘柄 TOP10（保有メンバー数順）---
+                        st.markdown("### 🔥 グループで人気の銘柄 TOP10")
+                        popular = (
+                            df_pos.groupby("ticker")
+                            .agg(
+                                holders=("user_id", "nunique"),
+                                total_qty=("qty", "sum"),
+                                avg_cost_mean=("avg_cost", "mean"),
+                            )
+                            .sort_values("holders", ascending=False)
+                            .head(10)
+                            .reset_index()
+                        )
+                        popular.columns = ["銘柄", "保有者数", "合計株数", "平均取得単価"]
+                        st.dataframe(popular, use_container_width=True)
+                        
+                        # --- セクター集中度（円グラフ）---
+                        st.markdown("### 📊 セクター集中度（保有株数ベース）")
+                        df_pos["sector"] = df_pos["ticker"].map(lambda t: SECTOR_MAP.get(t, "その他"))
+                        sector_agg = df_pos.groupby("sector")["qty"].sum().reset_index()
+                        fig_sec = px.pie(sector_agg, values="qty", names="sector", title="セクター保有比率")
+                        st.plotly_chart(fig_sec, use_container_width=True)
+                        
+                        # --- メンバー別 実現損益 ---
+                        st.markdown("### 🏅 メンバー別 実現損益（確定益）")
+                        member_pnl = (
+                            df_pos.groupby("nickname")["realized_pnl"]
+                            .sum()
+                            .sort_values(ascending=False)
+                            .reset_index()
+                        )
+                        member_pnl["realized_pnl"] = member_pnl["realized_pnl"].map(lambda x: f"¥{x:+,.0f}")
+                        member_pnl.columns = ["メンバー", "実現損益合計"]
+                        st.dataframe(member_pnl, use_container_width=True)
+                        
+                        # --- AIコメント ---
+                        st.markdown("### 🎤 トレーナーのひと言")
+                        context = f"""
+グループ{group_name}の保有銘柄集約:
+- メンバー数: {len(members)}名
+- 保有銘柄数(重複含む): {len(all_positions)}件
+- ユニーク銘柄数: {df_pos['ticker'].nunique()}
+- 人気TOP3: {', '.join(popular.head(3)['銘柄'].tolist())}
+- セクター偏り: {sector_agg.loc[sector_agg['qty'].idxmax(), 'sector']} に集中
+""".strip()
+                        try:
+                            from src.ai.analyst import analyze
+                            comment = analyze(context, "このグループの保有状況の特徴・リスク・強みを3行でコメントしてください。ぼーるくん（投資初心者〜中級者）向けの親しみやすい口調で。")
+                            st.info(comment)
+                        except Exception as e:
+                            st.warning(f"AIコメント生成失敗: {e}")
+            except Exception as e:
+                st.error(f"グループ保有分析エラー: {e}")
+
+        # ---------------------------
+        # Tab 6: Personal Holdings
+        # ---------------------------
+        with tab_personal:
+            st.subheader("🎯 私のパネル")
+            st.caption("LINE Bot に /myid と送ると取得できる、あなたの user_id を入力してください。")
+            
+            my_user_id = st.text_input(
+                "あなたの LINE user_id (U で始まる33文字)",
+                value="",
+                type="password",
+                help="LINE で株ボールシステム Bot に /myid と送信すると取得できます。"
+            )
+            
+            if not my_user_id:
+                st.info("user_id を入力するとあなたの保有銘柄分析が表示されます。")
+            elif not (my_user_id.startswith("U") and len(my_user_id) == 33):
+                st.error("user_id の形式が正しくありません（U で始まる33文字）。")
+            else:
+                try:
+                    from src.db.portfolio import get_positions
+                    my_positions = get_positions(my_user_id)
+                    
+                    if not my_positions:
+                        st.info("保有銘柄はまだありません。\nLINE Bot で /buy <ticker> <単価> <株数> と送ると登録されます。")
+                    else:
+                        df_my = pd.DataFrame(my_positions)
+                        
+                        # 型調整
+                        for col in ["qty", "avg_cost", "realized_pnl"]:
+                            if col in df_my.columns:
+                                df_my[col] = pd.to_numeric(df_my[col], errors="coerce").fillna(0)
+                        
+                        # --- 保有銘柄一覧 ---
+                        st.markdown("### 📝 保有銘柄一覧")
+                        df_display = df_my.copy()
+                        df_display["投資額"] = df_display["qty"] * df_display["avg_cost"]
+                        st.dataframe(
+                            df_display[["ticker", "qty", "avg_cost", "投資額", "realized_pnl"]]
+                            .rename(columns={
+                                "ticker": "銘柄",
+                                "qty": "株数",
+                                "avg_cost": "取得単価",
+                                "realized_pnl": "確定損益",
+                            }),
+                            use_container_width=True,
+                        )
+                        
+                        # --- サマリー ---
+                        total_invested = (df_my["qty"] * df_my["avg_cost"]).sum()
+                        total_realized = df_my["realized_pnl"].sum()
+                        ticker_count = df_my["ticker"].nunique()
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("保有銘柄数", f"{ticker_count}")
+                        col2.metric("投資額合計", f"¥{total_invested:,.0f}")
+                        col3.metric("確定損益合計", f"¥{total_realized:+,.0f}")
+                        
+                        # --- セクター配分 ---
+                        st.markdown("### 📊 セクター配分")
+                        df_my["sector"] = df_my["ticker"].map(lambda t: SECTOR_MAP.get(t, "その他"))
+                        df_my["invested"] = df_my["qty"] * df_my["avg_cost"]
+                        sec_agg = df_my.groupby("sector")["invested"].sum().reset_index()
+                        fig_my = px.pie(sec_agg, values="invested", names="sector", title="投資額ベースのセクター配分")
+                        st.plotly_chart(fig_my, use_container_width=True)
+                        
+                        # --- 勝ち負け銘柄 ---
+                        st.markdown("### 🎖️ 得意・苦手銘柄（確定損益ベース）")
+                        wins = df_my[df_my["realized_pnl"] > 0].sort_values("realized_pnl", ascending=False).head(5)
+                        losses = df_my[df_my["realized_pnl"] < 0].sort_values("realized_pnl").head(5)
+                        col_w, col_l = st.columns(2)
+                        with col_w:
+                            st.markdown("#### ✅ 得意 (TOP5)")
+                            if wins.empty:
+                                st.caption("まだ確定益の銘柄がありません。")
+                            else:
+                                st.dataframe(wins[["ticker", "realized_pnl"]].rename(columns={"ticker": "銘柄", "realized_pnl": "確定益"}))
+                        with col_l:
+                            st.markdown("#### ❌ 苦手 (TOP5)")
+                            if losses.empty:
+                                st.caption("まだ確定損の銘柄がありません。")
+                            else:
+                                st.dataframe(losses[["ticker", "realized_pnl"]].rename(columns={"ticker": "銘柄", "realized_pnl": "確定損"}))
+                        
+                        # --- AIコメント ---
+                        st.markdown("### 🎤 トレーナーのひと言")
+                        context = f"""
+保有銘柄: {', '.join(df_my['ticker'].tolist()[:10])}
+銘柄数: {ticker_count}
+投資額合計: ¥{total_invested:,.0f}
+確定損益: ¥{total_realized:+,.0f}
+セクター偏り: {sec_agg.loc[sec_agg['invested'].idxmax(), 'sector']} に集中
+""".strip()
+                        try:
+                            from src.ai.analyst import analyze
+                            my_comment = analyze(context, "このポートフォリオの特徴・リスク・改善点を3行でコメントしてください。ぼーるくんへの親しみやすい口調で。必ず情報ソースや根拠を添えて。")
+                            st.info(my_comment)
+                        except Exception as e:
+                            st.warning(f"AIコメント生成失敗: {e}")
+                except Exception as e:
+                    st.error(f"取得エラー: {e}")
 
     except Exception as e:
         st.error(f"システムエラー: {e}")
