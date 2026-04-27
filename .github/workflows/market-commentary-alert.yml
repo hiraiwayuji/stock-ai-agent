@@ -1,0 +1,36 @@
+name: Market Commentary Alert (Group)
+
+# US市場時間中、主要銘柄が3%超動いたらグループLINEに解説付きアラート
+# 17:00 UTC (US 12:00pm ET, JST 02:00) と 20:00 UTC (US 15:00pm ET, JST 05:00) に実行
+on:
+  schedule:
+    - cron: "0 17 * * 1-5"
+    - cron: "0 20 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run market commentary alert (push to group)
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID:              ${{ secrets.LINE_USER_ID }}
+          OPENAI_API_KEY:            ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL:              ${{ secrets.OPENAI_MODEL }}
+          SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TZ: Asia/Tokyo
+        run: python scripts/run_alert_with_commentary.py --threshold 3.0

@@ -1,0 +1,38 @@
+name: Holdings PnL Alert
+
+# 個人ポートフォリオの含み損益アラート（含み損益±3%超）
+# 朝8時JST (前日23:00 UTC) と 夕方6時JST (09:00 UTC) に実行
+on:
+  schedule:
+    # 8:00 JST = 23:00 UTC previous day. JST Mon-Fri = UTC Sun-Thu at 23:00
+    - cron: "0 23 * * 0-4"
+    # 18:00 JST = 09:00 UTC same day. JST Mon-Fri at 18:00 = UTC Mon-Fri at 09:00
+    - cron: "0 9 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run holdings PnL alert
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID:              ${{ secrets.LINE_USER_ID }}
+          OPENAI_API_KEY:            ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL:              ${{ secrets.OPENAI_MODEL }}
+          SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TZ: Asia/Tokyo
+        run: python scripts/run_holdings_alert.py --threshold 3.0
